@@ -1,4 +1,4 @@
-import type { QueryFilter } from 'mongoose'
+import type { QueryFilter, UpdateQuery } from 'mongoose'
 import { UserModel } from './user.model'
 import type { User } from './user.model'
 import { USER_ROLES, USER_STATUSES } from './user.constants'
@@ -39,6 +39,18 @@ const LEGACY_STATUSES: Record<string, UserStatus> = {
 }
 
 /**
+ * The Cloudinary public id, from before profile photos moved to Cloudflare R2.
+ *
+ * It is dropped rather than renamed to `photoKey`. A Cloudinary id means
+ * nothing to an object store, so carrying it over would claim the profile owns
+ * an R2 object that was never written, and a later "remove photo" would issue a
+ * delete for a key that does not exist. `photoUrl` is deliberately left alone:
+ * an avatar already hosted on Cloudinary keeps rendering until its owner
+ * replaces it, and the replacement lands in R2 like any other upload.
+ */
+const LEGACY_PHOTO_FIELD = 'photoPublicId'
+
+/**
  * Runs once, on the first successful connection. Idempotent by construction:
  * after the first pass the queries match nothing, so a reconnect costs two
  * empty updates. Never throws — a failure here must not take down a process
@@ -64,6 +76,15 @@ export async function normalizeLegacyUserRecords(): Promise<void> {
 
     if (changed > 0) {
       console.log(`[db] normalized ${changed} legacy role/status value(s)`)
+    }
+
+    const photos = await UserModel.updateMany(
+      { [LEGACY_PHOTO_FIELD]: { $exists: true } } as QueryFilter<User>,
+      { $unset: { [LEGACY_PHOTO_FIELD]: '' } } as UpdateQuery<User>,
+    )
+
+    if (photos.modifiedCount > 0) {
+      console.log(`[db] dropped ${photos.modifiedCount} legacy Cloudinary photo reference(s)`)
     }
 
     /**

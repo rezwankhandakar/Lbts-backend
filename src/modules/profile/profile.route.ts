@@ -28,9 +28,10 @@ router.use(requireDb, auth, requireActiveAccount)
 router.patch('/', validateRequest({ body: updateProfileSchema }), patchProfile)
 
 /**
- * Tighter than the global API limit. An upload costs a Cloudinary
- * transformation and free-tier bandwidth, so it gets its own budget: generous
- * for anyone adjusting their photo, useless for anyone burning quota.
+ * Tighter than the global API limit. An upload costs a resize on a small
+ * instance and a class-A write against the R2 free tier, so it gets its own
+ * budget: generous for anyone adjusting their photo, useless for anyone
+ * burning quota.
  */
 const photoUploadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,

@@ -19,13 +19,13 @@ const userSchema = new Schema(
     phone: { type: String, default: null, trim: true, maxlength: 24 },
     photoUrl: { type: String, default: null },
     /**
-     * Cloudinary reference for a photo uploaded through the profile module.
+     * Cloudflare R2 object key for a photo uploaded through the profile module.
      * MongoDB stores the reference, never the image itself. Null means the
      * photo came from the auth provider (a Google picture) or there is none —
-     * which is also what tells the service whether there is an asset to clean
+     * which is also what tells the service whether there is an object to clean
      * up when the photo is replaced or removed.
      */
-    photoPublicId: { type: String, default: null },
+    photoKey: { type: String, default: null },
     emailVerified: { type: Boolean, default: false },
     /**
      * Roles are assigned server-side only. Nothing in a request payload can set

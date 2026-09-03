@@ -3,7 +3,7 @@ import { AppError } from '../../utils/app-error'
 import type { UserDocument } from '../user/user.model'
 import { toPublicUser } from '../user/user.serializer'
 import type { PublicUser } from '../user/user.serializer'
-import { discardAvatar, uploadAvatar } from './profile.cloudinary'
+import { discardAvatar, uploadAvatar } from './profile.storage'
 import type { UpdateProfileInput } from './profile.validation'
 
 /**
@@ -60,29 +60,29 @@ export async function updateMyProfile(
 /**
  * Replaces the profile photo.
  *
- * The order is the whole point: the new asset is uploaded first, the reference
- * is written second, and only then is the previous asset deleted. At no point
+ * The order is the whole point: the new object is uploaded first, the reference
+ * is written second, and only then is the previous object deleted. At no point
  * does the profile point at an image that no longer exists — the worst outcome
  * of a failure here is an orphaned file, never a broken avatar.
  */
 export async function setProfilePhoto(user: UserDocument, buffer: Buffer): Promise<PublicUser> {
-  const previousPublicId = user.photoPublicId
+  const previousKey = user.photoKey
 
   const uploaded = await uploadAvatar(buffer)
 
   user.photoUrl = uploaded.url
-  user.photoPublicId = uploaded.publicId
+  user.photoKey = uploaded.key
 
   try {
     await user.save()
   } catch (error) {
-    // The upload succeeded but the reference never landed, so the new asset is
+    // The upload succeeded but the reference never landed, so the new object is
     // already unreachable. Clean it up rather than leave it behind.
-    await discardAvatar(uploaded.publicId)
+    await discardAvatar(uploaded.key)
     throw error
   }
 
-  await discardAvatar(previousPublicId)
+  await discardAvatar(previousKey)
 
   return toPublicUser(user)
 }
@@ -90,25 +90,25 @@ export async function setProfilePhoto(user: UserDocument, buffer: Buffer): Promi
 /**
  * Clears the profile photo.
  *
- * The reference goes first here too. Deleting the asset first would leave the
+ * The reference goes first here too. Deleting the object first would leave the
  * profile pointing at a dead URL if the write then failed, which every viewer
- * would see; an orphaned asset is visible to no one.
+ * would see; an orphaned object is visible to no one.
  *
- * A photo seeded from a Google account carries no Cloudinary id, so in that
- * case there is nothing to delete — only a reference to clear.
+ * A photo seeded from a Google account carries no key of ours, so in that case
+ * there is nothing to delete — only a reference to clear.
  */
 export async function clearProfilePhoto(user: UserDocument): Promise<PublicUser> {
-  if (!user.photoUrl && !user.photoPublicId) {
+  if (!user.photoUrl && !user.photoKey) {
     throw new AppError(409, 'There is no profile photo to remove.')
   }
 
-  const previousPublicId = user.photoPublicId
+  const previousKey = user.photoKey
 
   user.photoUrl = null
-  user.photoPublicId = null
+  user.photoKey = null
   await user.save()
 
-  await discardAvatar(previousPublicId)
+  await discardAvatar(previousKey)
 
   return toPublicUser(user)
 }

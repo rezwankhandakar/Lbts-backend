@@ -4,7 +4,7 @@ import type { UserRole, UserStatus } from './user.constants'
 
 /**
  * The shape the signed-in user sees of their own account, and everything the
- * profile module renders. `photoPublicId` is deliberately absent: it is an
+ * profile module renders. `photoKey` is deliberately absent: it is an
  * internal storage reference with no meaning to a client.
  */
 export interface PublicUser {

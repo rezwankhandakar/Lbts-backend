@@ -3,7 +3,7 @@ import { MulterError } from 'multer'
 import type { NextFunction, Request, Response } from 'express'
 import { AppError } from '../utils/app-error'
 
-/** Formats a browser can render everywhere, and Cloudinary can transform. */
+/** Formats a browser can render everywhere, and sharp can decode. */
 const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp'] as const
 
 /**
@@ -16,9 +16,10 @@ export const MAX_IMAGE_BYTES = 5 * 1024 * 1024
 export const ALLOWED_IMAGE_EXTENSIONS = 'JPG, PNG or WEBP'
 
 /**
- * Memory storage, deliberately: the buffer goes straight to Cloudinary and
- * nothing is ever written to disk. Render's filesystem is ephemeral, and a
- * temporary file is one more thing that can be left behind.
+ * Memory storage, deliberately: the buffer is resized in process and pushed
+ * straight to Cloudflare R2, and nothing is ever written to disk. Render's
+ * filesystem is ephemeral, and a temporary file is one more thing that can be
+ * left behind.
  *
  * Both limits are enforced here rather than in the handler, so a malicious
  * upload is rejected while it is still streaming.
