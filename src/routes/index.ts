@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { administrationRoutes } from '../modules/administration/administration.route'
+import { gatePassRoutes } from '../modules/gate-pass/gate-pass.route'
 import { profileRoutes } from '../modules/profile/profile.route'
 import { userRoutes } from '../modules/user/user.route'
 import { healthRoutes } from './health.route'
@@ -18,6 +19,7 @@ const routes: RouteDefinition[] = [
   { path: '/users', route: userRoutes },
   { path: '/profile', route: profileRoutes },
   { path: '/administration', route: administrationRoutes },
+  { path: '/gate-passes', route: gatePassRoutes },
 ]
 
 const router = Router()

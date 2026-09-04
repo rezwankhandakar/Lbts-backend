@@ -6,7 +6,8 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "tsx --test src/modules/gate-pass/gate-pass.validation.test.ts src/modules/gate-pass/gate-pass.domain.test.ts"
   },
   "type": "commonjs",
   "dependencies": {

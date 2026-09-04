@@ -1,4 +1,10 @@
-import { DeleteObjectCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import type { Readable } from 'node:stream'
+import {
+  DeleteObjectCommand,
+  GetObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3'
 import { AppError } from '../utils/app-error'
 import { config } from './index'
 
@@ -86,6 +92,58 @@ export async function putObject(input: PutObjectInput): Promise<void> {
     const message = error instanceof Error ? error.message : String(error)
     console.error(`[r2] failed to upload ${input.key}: ${message}`)
     throw new AppError(502, 'The image could not be uploaded. Please try again.')
+  }
+}
+
+export interface ObjectStream {
+  body: Readable
+  contentType: string | undefined
+  contentLength: number | undefined
+}
+
+/**
+ * Reads one object back out of the bucket.
+ *
+ * Profile photos never need this — they are public and the browser fetches
+ * them directly. Gate pass documents are the opposite case: the bucket must
+ * not serve them, so the API is the only read path and it streams rather than
+ * buffering, which keeps a 25 MB PDF off a small instance's heap.
+ */
+export async function getObjectStream(key: string): Promise<ObjectStream> {
+  const r2 = requireStorage()
+
+  try {
+    const response = await getClient().send(
+      new GetObjectCommand({ Bucket: r2.bucket, Key: key }),
+    )
+
+    if (!response.Body) {
+      throw new AppError(404, 'That document is no longer available.')
+    }
+
+    return {
+      // The SDK types Body as a union covering browser streams too; in Node it
+      // is always a Readable, and nothing else can reach this line.
+      body: response.Body as Readable,
+      contentType: response.ContentType,
+      contentLength: response.ContentLength,
+    }
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error
+    }
+
+    const name = (error as { name?: string }).name
+    if (name === 'NoSuchKey' || name === 'NotFound') {
+      // The reference outlived the object. That is a real 404 for the caller,
+      // not a server fault, and it is worth logging as a storage drift.
+      console.warn(`[r2] missing object for key ${key}`)
+      throw new AppError(404, 'That document is no longer available.')
+    }
+
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`[r2] failed to read ${key}: ${message}`)
+    throw new AppError(502, 'The document could not be retrieved. Please try again.')
   }
 }
 

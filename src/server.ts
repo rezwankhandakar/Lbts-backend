@@ -8,6 +8,7 @@ import {
   registerConnectionEvents,
 } from './config/db'
 import { ensureDnsResolvers } from './config/dns'
+import { foldLegacyGatePassProducts } from './modules/gate-pass/gate-pass.migration'
 import { normalizeLegacyUserRecords } from './modules/user/user.migration'
 
 let server: Server | undefined
@@ -62,6 +63,9 @@ function start(): void {
   // the current enums. Without it those documents cannot be saved at all.
   onceConnected(() => {
     void normalizeLegacyUserRecords()
+    // Gate passes written before a challan could carry several product lines
+    // still hold one product on the record itself, where nothing can read it.
+    void foldLegacyGatePassProducts()
   })
 
   process.on('SIGTERM', () => shutdown('SIGTERM'))

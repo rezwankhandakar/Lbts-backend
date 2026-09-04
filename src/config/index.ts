@@ -51,6 +51,12 @@ const envSchema = z.object({
   R2_PUBLIC_BASE_URL: z.preprocess(blank, z.url().optional()),
   /** Key prefix every avatar is stored under. Object storage has no folders. */
   R2_KEY_PREFIX: z.preprocess(blank, z.string().trim().min(1).default('avatars')),
+  /**
+   * Key prefix for scanned gate pass documents, kept separate from avatars so
+   * the two can be given different lifecycle rules in the bucket — an avatar
+   * is disposable, a gate pass is a business record.
+   */
+  R2_GATE_PASS_PREFIX: z.preprocess(blank, z.string().trim().min(1).default('gate-passes')),
 })
 
 const parsed = envSchema.safeParse(process.env)
@@ -89,11 +95,14 @@ const r2 =
         endpoint: `https://${parsed.data.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
         publicBaseUrl: parsed.data.R2_PUBLIC_BASE_URL.replace(/\/+$/, ''),
         keyPrefix: trimSlashes(parsed.data.R2_KEY_PREFIX),
+        gatePassKeyPrefix: trimSlashes(parsed.data.R2_GATE_PASS_PREFIX),
       }
     : null
 
 if (!r2) {
-  console.warn('[config] Cloudflare R2 is not configured — profile photo uploads will return 503.')
+  console.warn(
+    '[config] Cloudflare R2 is not configured — profile photo and gate pass document uploads will return 503.',
+  )
 }
 
 export const config = {
