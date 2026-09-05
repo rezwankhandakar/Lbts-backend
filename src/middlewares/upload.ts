@@ -1,6 +1,7 @@
 import multer from 'multer'
 import { MulterError } from 'multer'
 import type { NextFunction, Request, Response } from 'express'
+import { MAX_CHALLAN_UPLOAD_BYTES } from '../modules/challan/challan.constants'
 import {
   GATE_PASS_DOCUMENT_MIME_TYPES,
   MAX_GATE_PASS_DOCUMENT_BYTES,
@@ -109,6 +110,62 @@ export function uploadGatePassScan(req: Request, res: Response, next: NextFuncti
   uploadScan(req, res, (error: unknown) => {
     if (error instanceof MulterError) {
       next(translateScan(error))
+      return
+    }
+    if (error) {
+      next(error)
+      return
+    }
+    next()
+  })
+}
+
+/**
+ * The pages of one challan, cut out of the operator's WhatsApp PDF.
+ *
+ * PDF only — this is never a photograph. And a much tighter ceiling than a
+ * gate pass scan, deliberately: the browser extracts a handful of pages out of
+ * the source file and uploads only those, so anything approaching the source
+ * file's own size means the extraction did not happen and the whole document
+ * is on its way up. Refusing it here is what keeps that off the instance.
+ *
+ * `fields` is higher than the other two parsers because a challan submission
+ * carries its values in the same multipart body as the file — the record and
+ * its document are created together or not at all.
+ */
+const uploadChallan = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_CHALLAN_UPLOAD_BYTES, files: 1, fields: 30 },
+  fileFilter(_req, file, callback) {
+    if (file.mimetype !== 'application/pdf') {
+      callback(new AppError(400, 'The challan pages have to be sent as a PDF.'))
+      return
+    }
+    callback(null, true)
+  },
+}).single('pages')
+
+function translateChallan(error: MulterError): AppError {
+  const megabytes = Math.round(MAX_CHALLAN_UPLOAD_BYTES / (1024 * 1024))
+
+  switch (error.code) {
+    case 'LIMIT_FILE_SIZE':
+      return new AppError(
+        413,
+        `Those challan pages are larger than ${megabytes} MB. Select a narrower page range.`,
+      )
+    case 'LIMIT_FILE_COUNT':
+    case 'LIMIT_UNEXPECTED_FILE':
+      return new AppError(400, 'Send exactly one PDF, in a field named "pages".')
+    default:
+      return new AppError(400, 'The submission could not be read. Please try again.')
+  }
+}
+
+export function uploadChallanPages(req: Request, res: Response, next: NextFunction): void {
+  uploadChallan(req, res, (error: unknown) => {
+    if (error instanceof MulterError) {
+      next(translateChallan(error))
       return
     }
     if (error) {

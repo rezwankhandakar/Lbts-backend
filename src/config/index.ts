@@ -57,6 +57,18 @@ const envSchema = z.object({
    * is disposable, a gate pass is a business record.
    */
   R2_GATE_PASS_PREFIX: z.preprocess(blank, z.string().trim().min(1).default('gate-passes')),
+  /**
+   * Key prefix for generated challan documents. Its own prefix for the same
+   * reason gate passes have one: a challan document is a business record with
+   * a different retention story from a disposable avatar, and the bucket can
+   * only give the two different lifecycle rules if they sit under different
+   * keys.
+   *
+   * The *source* WhatsApp PDF is never written under this prefix, or anywhere
+   * else. It is a temporary working document held in the operator's browser;
+   * what lands here is only what an individual submitted challan became.
+   */
+  R2_CHALLAN_PREFIX: z.preprocess(blank, z.string().trim().min(1).default('challans')),
 })
 
 const parsed = envSchema.safeParse(process.env)
@@ -96,12 +108,13 @@ const r2 =
         publicBaseUrl: parsed.data.R2_PUBLIC_BASE_URL.replace(/\/+$/, ''),
         keyPrefix: trimSlashes(parsed.data.R2_KEY_PREFIX),
         gatePassKeyPrefix: trimSlashes(parsed.data.R2_GATE_PASS_PREFIX),
+        challanKeyPrefix: trimSlashes(parsed.data.R2_CHALLAN_PREFIX),
       }
     : null
 
 if (!r2) {
   console.warn(
-    '[config] Cloudflare R2 is not configured — profile photo and gate pass document uploads will return 503.',
+    '[config] Cloudflare R2 is not configured — profile photo, gate pass and challan document endpoints will return 503.',
   )
 }
 

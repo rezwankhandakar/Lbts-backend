@@ -5,7 +5,11 @@ import { AppError } from '../../utils/app-error'
 import { UserModel } from '../user/user.model'
 import type { UserDocument } from '../user/user.model'
 import { assertCanDelete, assertCanEdit, assertCanView, visibilityFilter } from './gate-pass.access'
-import { canTransitionGatePass, comparisonKey } from './gate-pass.constants'
+import {
+  canTransitionGatePass,
+  comparisonKey,
+  needsReverificationAfterEdit,
+} from './gate-pass.constants'
 import type { GatePassStatus } from './gate-pass.constants'
 import { allocateGatePassId } from './gate-pass.counter'
 import { GatePassModel } from './gate-pass.model'
@@ -17,6 +21,7 @@ import type { UploadDocumentInput } from './gate-pass.storage'
 import type {
   CreateGatePassInput,
   DuplicateQuery,
+  GatePassFilterQuery,
   ListGatePassesQuery,
   ReviewGatePassInput,
   SubmitGatePassInput,
@@ -28,6 +33,12 @@ import type {
 export interface ListGatePassesResult {
   records: GatePassRecord[]
   total: number
+  /**
+   * Every quantity on every matching record, not just the page on screen.
+   * The whole point of the figure is that it answers "how much did these
+   * filters just describe", which a page of ten could never say.
+   */
+  totalQty: number
 }
 
 export interface GatePassStats {
@@ -89,7 +100,7 @@ async function serialize(record: GatePassDocument): Promise<GatePassRecord> {
   return toGatePassRecord(record, names)
 }
 
-function buildListFilter(query: ListGatePassesQuery, viewer: UserDocument): QueryFilter<GatePass> {
+function buildListFilter(query: GatePassFilterQuery, viewer: UserDocument): QueryFilter<GatePass> {
   const clauses: QueryFilter<GatePass>[] = []
 
   const visibility = visibilityFilter(viewer)
@@ -163,6 +174,31 @@ function buildListFilter(query: ListGatePassesQuery, viewer: UserDocument): Quer
   return clauses.length > 0 ? { $and: clauses } : {}
 }
 
+interface GatePassTotals {
+  total: number
+  totalQty: number
+}
+
+/**
+ * How many records match a filter, and how much they carry between them.
+ *
+ * One grouped pass rather than a count plus a second aggregation: both figures
+ * are read off the same matching set, and the list is already paying for a
+ * round trip of its own on a cluster that charges for every one. The inner
+ * `$sum` adds the quantities inside a single record's items array; the outer
+ * one adds those subtotals across the records.
+ */
+async function totalsFor(filter: QueryFilter<GatePass>): Promise<GatePassTotals> {
+  const [row] = await GatePassModel.aggregate<GatePassTotals>([
+    { $match: filter },
+    { $group: { _id: null, total: { $sum: 1 }, totalQty: { $sum: { $sum: '$items.qty' } } } },
+    { $project: { _id: 0, total: 1, totalQty: 1 } },
+  ])
+
+  // An empty result set groups to no rows at all, which is zero of both.
+  return row ?? { total: 0, totalQty: 0 }
+}
+
 export async function listGatePasses(
   query: ListGatePassesQuery,
   viewer: UserDocument,
@@ -170,16 +206,74 @@ export async function listGatePasses(
   const filter = buildListFilter(query, viewer)
   const skip = (query.page - 1) * query.limit
 
-  const [records, total] = await Promise.all([
+  const [records, totals] = await Promise.all([
     GatePassModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(query.limit),
-    GatePassModel.countDocuments(filter),
+    totalsFor(filter),
   ])
 
   const names = await resolveActorNames(records)
 
   return {
     records: records.map((record) => toGatePassRecord(record, names)),
-    total,
+    total: totals.total,
+    totalQty: totals.totalQty,
+  }
+}
+
+/**
+ * How many records one download may carry. Records, not rows: a gate pass
+ * carrying three products is three rows in the sheet.
+ *
+ * An export is the one read in this module that is not paged, so it is also
+ * the one that could ask an M0 cluster and a 512 MB instance for a year of
+ * records at once. Past this the request is refused with the count and a note
+ * to narrow the filters — a silently truncated spreadsheet is worse than no
+ * spreadsheet, because nothing on the page says the bottom of it is missing.
+ */
+export const MAX_EXPORT_RECORDS = 5000
+
+export interface GatePassExport {
+  records: GatePassRecord[]
+  /** The same figure the filtered list shows, so the two cannot disagree. */
+  totalQty: number
+}
+
+/**
+ * Every record matching the current filters, for the spreadsheet.
+ *
+ * The same `buildListFilter` and the same visibility rules as the list, so a
+ * download can never contain a row its owner could not have opened — an
+ * export that quietly widened the query would be the easiest way in the app
+ * to read somebody else's draft.
+ *
+ * Ordered by trip date rather than by when the record was typed: a
+ * spreadsheet covering a month is read chronologically, and any other order
+ * is one click away once it is open.
+ */
+export async function exportGatePasses(
+  query: GatePassFilterQuery,
+  viewer: UserDocument,
+): Promise<GatePassExport> {
+  const filter = buildListFilter(query, viewer)
+  const totals = await totalsFor(filter)
+
+  if (totals.total === 0) {
+    throw new AppError(404, 'No gate passes match these filters, so there is nothing to export.')
+  }
+
+  if (totals.total > MAX_EXPORT_RECORDS) {
+    throw new AppError(
+      400,
+      `That is ${totals.total} gate passes. Narrow the filters to ${MAX_EXPORT_RECORDS} or fewer and export again.`,
+    )
+  }
+
+  const records = await GatePassModel.find(filter).sort({ tripDate: 1, gatePassId: 1 })
+  const names = await resolveActorNames(records)
+
+  return {
+    records: records.map((record) => toGatePassRecord(record, names)),
+    totalQty: totals.totalQty,
   }
 }
 
@@ -305,6 +399,30 @@ export async function createGatePass(
   return serialize(record)
 }
 
+/**
+ * Sends a record back to be checked again, when a correction has invalidated
+ * the verdict already on it.
+ *
+ * A verification says "these values match this scan". Change either side and
+ * that sentence is about content nobody read, so the record returns to
+ * Submitted and a reviewer sees it again. Everything still open — a draft, a
+ * rejection being corrected, something already awaiting review — carries no
+ * verdict to invalidate and is left exactly where it is.
+ *
+ * The mover is the person doing the correcting, which is what makes the
+ * provenance on the record honest: statusChangedBy is who caused the move.
+ */
+function returnForReverification(record: GatePassDocument, actor: UserDocument): void {
+  if (!needsReverificationAfterEdit(record.status as GatePassStatus)) {
+    return
+  }
+
+  record.status = 'Submitted'
+  record.statusChangedAt = new Date()
+  record.statusChangedBy = actor._id
+  record.statusNote = null
+}
+
 export async function updateGatePass(
   id: string,
   input: UpdateGatePassInput,
@@ -314,6 +432,7 @@ export async function updateGatePass(
   assertCanEdit(record, actor)
 
   applyFields(record, input)
+  returnForReverification(record, actor)
   record.updatedBy = actor._id
   await record.save()
 
@@ -357,13 +476,11 @@ export async function findDuplicates(
     return []
   }
 
+  // Every stored record counts, in any status. A gate pass that turned out to
+  // be a mistake is deleted rather than withdrawn, so anything still in the
+  // collection is something the operator should be asked about.
   const filter: QueryFilter<GatePass> = {
-    $and: [
-      { $or: clauses },
-      // A cancelled record is not a duplicate of anything; it is the mistake
-      // somebody already corrected.
-      { status: { $ne: 'Cancelled' } },
-    ],
+    $and: [{ $or: clauses }],
   }
 
   if (query.excludeId) {
@@ -510,8 +627,8 @@ export async function submitGatePass(
 }
 
 /**
- * The reviewer's decision: verified against the physical document, rejected
- * back for correction, or cancelled outright.
+ * The reviewer's decision: verified against the physical document, or rejected
+ * back for correction.
  *
  * A note survives only while it is still the reason for the current state — a
  * rejection keeps its note so the operator can act on it, and a verification
@@ -582,6 +699,9 @@ export async function setGatePassDocument(
   const stored = await uploadGatePassDocument(upload)
 
   record.document = stored
+  // The scan is the other half of what a reviewer checked, so replacing it
+  // costs the same as rewriting the values.
+  returnForReverification(record, actor)
   record.updatedBy = actor._id
 
   try {
@@ -638,9 +758,13 @@ export async function readGatePassDocument(
 }
 
 /**
- * Removes a draft entirely. The document goes after the record, for the same
- * reason it does everywhere else in this codebase: an orphaned object is
- * cheaper than a live reference to a deleted one.
+ * Removes a gate pass entirely — the record and its scanned document, in any
+ * status. This is the module's only way to withdraw something; access.ts
+ * decides whose records the actor may remove.
+ *
+ * The document goes after the record, for the same reason it does everywhere
+ * else in this codebase: an orphaned object is cheaper than a live reference
+ * to a deleted one.
  */
 export async function removeGatePass(id: string, actor: UserDocument): Promise<{ id: string }> {
   const record = await findRecord(id)

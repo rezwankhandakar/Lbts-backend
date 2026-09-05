@@ -1,5 +1,6 @@
 import { GatePassModel } from './gate-pass.model'
 import { comparisonKey } from './gate-pass.constants'
+import { discardGatePassDocument } from './gate-pass.storage'
 
 /**
  * Folds a gate pass written with one product into the `items` list.
@@ -92,5 +93,60 @@ export async function foldLegacyGatePassProducts(): Promise<void> {
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.error(`[gate-pass] product migration failed: ${message}`)
+  }
+}
+
+/** A withdrawn record, as it sits in the collection under the old vocabulary. */
+interface CancelledGatePass {
+  _id: unknown
+  gatePassId?: string
+  document?: { key?: string }
+}
+
+/**
+ * Removes gate passes left in the retired `Cancelled` status.
+ *
+ * The module used to withdraw a record by parking it in a terminal status;
+ * it now deletes one outright, and `Cancelled` is gone from the enum. A
+ * document still holding that value is not merely stale — Mongoose validates
+ * the whole document, so it could no longer be saved at all, and it would
+ * render as an unrecognised status in every list it appeared in.
+ *
+ * Withdrawn is what these records already meant, so they are deleted rather
+ * than moved to some other status that would misrepresent them. The scanned
+ * document goes with each one, in the same order the service uses: the record
+ * first, then the object, so the worst outcome is an orphan in the bucket.
+ *
+ * Idempotent — a second run finds nothing. Never throws, for the same reason
+ * the product migration does not: a migration that takes the API down on boot
+ * is worse than the records it was trying to fix.
+ */
+export async function purgeCancelledGatePasses(): Promise<void> {
+  try {
+    /**
+     * Through the driver rather than the model: `Cancelled` is no longer part
+     * of the schema's enum, and reading these through Mongoose would mean
+     * casting a value the schema has been told does not exist.
+     */
+    const collection = GatePassModel.collection
+
+    const cancelled = (await collection
+      .find({ status: 'Cancelled' })
+      .toArray()) as unknown as CancelledGatePass[]
+
+    if (cancelled.length === 0) {
+      return
+    }
+
+    console.log(`[gate-pass] removing ${cancelled.length} cancelled record(s)`)
+
+    for (const record of cancelled) {
+      await collection.deleteOne({ _id: record._id as never })
+      await discardGatePassDocument(record.document?.key ?? null)
+      console.log(`[gate-pass] removed ${record.gatePassId ?? String(record._id)} (cancelled)`)
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    console.error(`[gate-pass] cancelled-record purge failed: ${message}`)
   }
 }

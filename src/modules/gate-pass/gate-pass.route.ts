@@ -14,6 +14,7 @@ import {
   deleteGatePass,
   getDocument,
   getDuplicates,
+  getExport,
   getGatePasses,
   getOne,
   getStats,
@@ -27,6 +28,7 @@ import {
 import {
   createGatePassSchema,
   duplicateQuerySchema,
+  exportGatePassesQuerySchema,
   gatePassIdParamSchema,
   listGatePassesQuerySchema,
   reviewGatePassSchema,
@@ -66,6 +68,32 @@ router.get('/duplicates', validateRequest({ query: duplicateQuerySchema }), getD
  * same read roles and the same visibility rules as the records themselves.
  */
 router.get('/suggestions', validateRequest({ query: suggestionQuerySchema }), getSuggestions)
+
+/**
+ * The spreadsheet. Its own budget, and a small one: an export reads every
+ * matching record rather than a page of ten and then builds a workbook in
+ * memory, so it is the most expensive read in the module by a wide margin.
+ * Twelve in a quarter of an hour is more than a month-end reconciliation
+ * needs, and far less than anything that would hold an M0 cluster down.
+ */
+const exportLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 12,
+  standardHeaders: 'draft-7',
+  legacyHeaders: false,
+  message: {
+    success: false,
+    message: 'Too many exports. Please try again in a few minutes.',
+    errorSources: [{ path: 'export', message: 'Export rate limit exceeded.' }],
+  },
+})
+
+router.get(
+  '/export',
+  exportLimiter,
+  validateRequest({ query: exportGatePassesQuerySchema }),
+  getExport,
+)
 
 router.get('/', validateRequest({ query: listGatePassesQuerySchema }), getGatePasses)
 router.post('/', canWrite, validateRequest({ body: createGatePassSchema }), postGatePass)

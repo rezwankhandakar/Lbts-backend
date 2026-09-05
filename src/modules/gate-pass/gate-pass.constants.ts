@@ -13,16 +13,15 @@ import type { UserRole } from '../user/user.constants'
  * optional field, and only its author (or an administrator) sees it as
  * unfinished work. `Submitted` is the claim that this is a real, complete gate
  * pass; from there a reviewer either `Verified` it against the physical
- * document or `Rejected` it back for correction. `Cancelled` is the terminal
- * "this should never have existed" state, and nothing leaves it.
+ * document or `Rejected` it back for correction. `Verified` is the end of
+ * the line.
+ *
+ * There is no withdrawn state. A gate pass that should never have existed is
+ * deleted outright — see `assertCanDelete` — rather than parked in a status
+ * that every list, count, filter and duplicate probe then has to remember to
+ * exclude.
  */
-export const GATE_PASS_STATUSES = [
-  'Draft',
-  'Submitted',
-  'Verified',
-  'Rejected',
-  'Cancelled',
-] as const
+export const GATE_PASS_STATUSES = ['Draft', 'Submitted', 'Verified', 'Rejected'] as const
 export type GatePassStatus = (typeof GATE_PASS_STATUSES)[number]
 
 export const DEFAULT_GATE_PASS_STATUS: GatePassStatus = 'Draft'
@@ -34,13 +33,17 @@ export const DEFAULT_GATE_PASS_STATUS: GatePassStatus = 'Draft'
  * `Rejected -> Submitted` is what makes a rejection actionable: the operator
  * fixes what the reviewer flagged and sends the same record back, rather than
  * creating a second gate pass for the same trip.
+ *
+ * `Verified -> Submitted` is the same idea one step later. A verification says
+ * "these values match the scan"; the moment the values or the scan change it
+ * says that about content nobody checked, so correcting a verified record
+ * returns it for verification rather than quietly keeping the old verdict.
  */
 export const GATE_PASS_TRANSITIONS: Record<GatePassStatus, readonly GatePassStatus[]> = {
-  Draft: ['Submitted', 'Cancelled'],
-  Submitted: ['Verified', 'Rejected', 'Cancelled'],
-  Verified: ['Cancelled'],
-  Rejected: ['Submitted', 'Cancelled'],
-  Cancelled: [],
+  Draft: ['Submitted'],
+  Submitted: ['Verified', 'Rejected'],
+  Verified: ['Submitted'],
+  Rejected: ['Submitted'],
 }
 
 export function canTransitionGatePass(from: GatePassStatus, to: GatePassStatus): boolean {
@@ -49,11 +52,20 @@ export function canTransitionGatePass(from: GatePassStatus, to: GatePassStatus):
   return (GATE_PASS_TRANSITIONS[from] ?? []).includes(to)
 }
 
-/** The two states in which the content of a gate pass may still be edited. */
-export const EDITABLE_GATE_PASS_STATUSES: readonly GatePassStatus[] = ['Draft', 'Rejected']
+/**
+ * Status no longer decides whether a gate pass may be edited — a transcription
+ * error is worth fixing whenever it is spotted, and a record nobody can
+ * correct is a record nobody can trust. Who may edit is the rule instead, and
+ * it lives in `gate-pass.access.ts`.
+ *
+ * What status does decide is what a correction costs. These are the states
+ * carrying a reviewer's verdict about specific content; changing that content
+ * sends the record back to be checked again.
+ */
+export const REVERIFY_ON_EDIT_STATUSES: readonly GatePassStatus[] = ['Verified']
 
-export function isEditableStatus(status: GatePassStatus): boolean {
-  return EDITABLE_GATE_PASS_STATUSES.includes(status)
+export function needsReverificationAfterEdit(status: GatePassStatus): boolean {
+  return REVERIFY_ON_EDIT_STATUSES.includes(status)
 }
 
 /**
@@ -71,8 +83,11 @@ export type GatePassReferenceType = (typeof GATE_PASS_REFERENCE_TYPES)[number]
  *
  * Reading covers the records list, one record, and its scanned document.
  * Writing covers creating a gate pass and editing or submitting one that is
- * still open. Reviewing is the verification decision, and cancelling a record
- * that has already left Draft.
+ * still open — and deleting one. Reviewing is the verification decision.
+ *
+ * Deleting is deliberately not a fourth set: it is `canWrite` on the route
+ * plus the ownership rule in `gate-pass.access.ts`, so an operator removes
+ * their own work and only Admin or Manager removes anybody else's.
  *
  * `Vendor` appears in none of them: gate passes are the transport service's
  * own operating record, not something an external supplier files or reads.
@@ -85,8 +100,8 @@ export const GATE_PASS_REVIEW_ROLES: readonly UserRole[] = ['Admin', 'Manager']
 
 /**
  * Roles that may act on a record they did not create. Everyone else is scoped
- * to their own work — an OpEx edits and submits their own gate passes, and
- * cannot touch a colleague's.
+ * to their own work — an OpEx edits, submits and deletes their own gate
+ * passes, and cannot touch a colleague's.
  */
 export const GATE_PASS_MANAGE_ANY_ROLES: readonly UserRole[] = ['Admin', 'Manager']
 

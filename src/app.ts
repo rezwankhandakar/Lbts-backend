@@ -55,6 +55,13 @@ app.use(
       callback(null, false)
     },
     credentials: true,
+    /**
+     * The browser cannot read a response header it was not handed across an
+     * origin, and the frontend is on Netlify while this is on Render. Without
+     * this the gate pass export would save as a generic filename, because the
+     * name the server chose is in a header the client would never see.
+     */
+    exposedHeaders: ['Content-Disposition'],
   }),
 )
 

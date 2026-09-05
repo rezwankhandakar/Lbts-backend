@@ -6,6 +6,7 @@ import type { UserDocument } from '../user/user.model'
 import {
   DuplicateGatePassError,
   createGatePass,
+  exportGatePasses,
   findDuplicates,
   getGatePass,
   getGatePassStats,
@@ -18,9 +19,11 @@ import {
   suggestValues,
   updateGatePass,
 } from './gate-pass.service'
+import { buildGatePassWorkbook, gatePassExportFilename } from './gate-pass.export'
 import type {
   CreateGatePassInput,
   DuplicateQuery,
+  GatePassFilterQuery,
   ListGatePassesQuery,
   ReviewGatePassInput,
   SubmitGatePassInput,
@@ -51,7 +54,7 @@ function idFrom(req: Request): string {
 
 export async function getGatePasses(req: Request, res: Response): Promise<void> {
   const query = req.validated?.query as ListGatePassesQuery
-  const { records, total } = await listGatePasses(query, actorFrom(req))
+  const { records, total, totalQty } = await listGatePasses(query, actorFrom(req))
 
   sendResponse(res, {
     statusCode: 200,
@@ -62,6 +65,9 @@ export async function getGatePasses(req: Request, res: Response): Promise<void> 
       limit: query.limit,
       total,
       totalPages: Math.max(1, Math.ceil(total / query.limit)),
+      // Summed over every matching record rather than this page, because the
+      // question it answers is about the filters and not about the scroll.
+      totalQty,
     },
   })
 }
@@ -94,6 +100,36 @@ export async function getSuggestions(req: Request, res: Response): Promise<void>
     message: 'Suggestions retrieved',
     data: values,
   })
+}
+
+/**
+ * The records list as a spreadsheet.
+ *
+ * Like the document endpoint, this answers with bytes rather than the standard
+ * JSON envelope — the body is the file. Anything thrown before the first byte
+ * still reaches the global error handler as JSON, which is what lets the
+ * service refuse a set too large to build and have the browser read the
+ * reason.
+ *
+ * `attachment` rather than `inline`: a spreadsheet is something the operator
+ * opens in Excel, not something a browser should try to render.
+ */
+export async function getExport(req: Request, res: Response): Promise<void> {
+  const query = req.validated?.query as GatePassFilterQuery
+  const { records } = await exportGatePasses(query, actorFrom(req))
+  const workbook = await buildGatePassWorkbook(records)
+
+  res.setHeader(
+    'Content-Type',
+    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  )
+  res.setHeader('Content-Disposition', `attachment; filename="${gatePassExportFilename()}"`)
+  // The file is built from records behind authentication, so no shared cache
+  // may keep a copy of it.
+  res.setHeader('Cache-Control', 'private, no-store')
+  res.setHeader('Content-Length', String(workbook.byteLength))
+
+  res.end(workbook)
 }
 
 export async function getOne(req: Request, res: Response): Promise<void> {
@@ -249,7 +285,7 @@ export async function deleteGatePass(req: Request, res: Response): Promise<void>
 
   sendResponse(res, {
     statusCode: 200,
-    message: 'Draft deleted',
+    message: 'Gate pass deleted',
     data: removed,
   })
 }

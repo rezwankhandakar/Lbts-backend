@@ -1,0 +1,330 @@
+import type { Types } from 'mongoose'
+import { batchProgress, unassignedRanges } from './lib/page-ranges'
+import type { PageRange } from './lib/page-ranges'
+import type { ChallanBatchStatus, ChallanStatus } from './challan.constants'
+import type { ChallanBatchDocument } from './challan-batch.model'
+import type { ChallanDocument } from './challan.model'
+
+/**
+ * One product line, as a client sees it.
+ *
+ * The field is `model` here and `productModel` in MongoDB — the stored name
+ * avoids a collision with Mongoose's own `Document.model()`, and this is where
+ * the two are mapped. The same arrangement Gate Pass uses.
+ */
+export interface ChallanItem {
+  productName: string
+  model: string
+  qty: number
+}
+
+/** Who filed a record or last changed it, resolved to something displayable. */
+export interface ActorRef {
+  id: string
+  name: string
+}
+
+/**
+ * The generated document, as a client sees it.
+ *
+ * `url` is an API path, not a Cloudflare URL. A challan carries a customer's
+ * home address and phone number, so the object is never served from a public
+ * bucket: GET /challans/:id/document re-checks authentication and role and
+ * streams it. That is the one place the R2 key is used, and the key is not
+ * exposed here — it has no meaning to a client.
+ */
+export interface ChallanDocumentRef {
+  url: string
+  /** Always a PDF. Present so the viewer needs no special case for this module. */
+  mimeType: 'application/pdf'
+  size: number
+  /** Front pages plus the one generated back page. */
+  pageCount: number
+  generatedAt: string
+}
+
+export interface ChallanRecord {
+  id: string
+  slNumber: number
+  challanNumber: string
+  status: ChallanStatus
+
+  batchId: string
+  sourceFileName: string
+  sourcePageStart: number
+  sourcePageEnd: number
+  /** Derived, so a list can say "3 pages" without doing the arithmetic. */
+  sourcePageCount: number
+
+  customerName: string
+  deliveryAddress: string
+  thana: string
+  district: string
+  receiverMobile: string
+  senderMobile: string | null
+  zonePo: string | null
+
+  /** One line per product on the challan; always at least one. */
+  items: ChallanItem[]
+  /** Every quantity added up. Derived, so a list can show one number. */
+  totalQty: number
+
+  document: ChallanDocumentRef
+
+  createdBy: ActorRef | null
+  submittedBy: ActorRef | null
+  updatedBy: ActorRef | null
+  createdAt: string
+  updatedAt: string
+  submittedAt: string
+  amendedAt: string | null
+}
+
+/** One source file, and how far through it the operation has got. */
+export interface ChallanBatchRecord {
+  id: string
+  sourceFileName: string
+  sourcePageCount: number
+  sourceFileSize: number | null
+  status: ChallanBatchStatus
+  challanCount: number
+  /** Filed plus marked-blank: everything the operator has accounted for. */
+  assignedPages: number
+  unassignedPages: number
+  /** Pages the operator said are not challans, in ascending order. */
+  skippedPages: number[]
+  percent: number
+  isComplete: boolean
+  completedAt: string | null
+  createdBy: ActorRef | null
+  createdAt: string
+  updatedAt: string
+}
+
+/** The batch page: the batch, its challans, and what is still unaccounted for. */
+export interface ChallanBatchDetail extends ChallanBatchRecord {
+  challans: ChallanRecord[]
+  /**
+   * Pages of the source PDF nobody has accounted for — neither filed as a
+   * challan nor marked as not being one — collapsed into ranges. Empty for a
+   * finished batch, and the list the batch page asks the operator to resolve.
+   */
+  unassignedRanges: PageRange[]
+  /** The marked-blank pages, collapsed the same way, so they can be undone. */
+  skippedRanges: PageRange[]
+}
+
+/**
+ * The narrow view the duplicate dialog renders. Deliberately not a full
+ * record: the operator is deciding "have I already filed this one", and
+ * anything beyond these fields is noise at that moment.
+ */
+export interface DuplicateChallanCandidate {
+  id: string
+  slNumber: number
+  challanNumber: string
+  customerName: string
+  deliveryAddress: string
+  receiverMobile: string
+  /** The first product line, which is enough to recognise the delivery. */
+  product: string
+  model: string
+  qty: number
+  /** How many more lines the record carries beyond the one shown. */
+  moreItems: number
+  sourceFileName: string
+  sourcePageStart: number
+  sourcePageEnd: number
+  /** Which probe matched, so the dialog can say why it is asking. */
+  matchedOn: 'customer' | 'mobile'
+}
+
+/** The stored rows, with `productModel` renamed back to `model`. */
+function toItems(challan: ChallanDocument): ChallanItem[] {
+  return challan.items.map((item) => ({
+    productName: item.productName,
+    model: item.productModel,
+    qty: item.qty,
+  }))
+}
+
+function totalQtyOf(challan: ChallanDocument): number {
+  return challan.items.reduce((total, item) => total + item.qty, 0)
+}
+
+function toIso(value: Date | null | undefined): string | null {
+  return value ? value.toISOString() : null
+}
+
+function actorFrom(
+  id: Types.ObjectId | null | undefined,
+  names: Map<string, string>,
+): ActorRef | null {
+  if (!id) {
+    return null
+  }
+  const key = String(id)
+  // An actor whose own account was deleted still leaves an id behind.
+  return { id: key, name: names.get(key) ?? 'Removed account' }
+}
+
+/**
+ * `actorNames` maps an actor id to their display name. The caller resolves
+ * every actor on a page of results in one indexed lookup rather than
+ * populating row by row — on M0 the difference is worth the plumbing.
+ */
+export function toChallanRecord(
+  challan: ChallanDocument,
+  actorNames: Map<string, string>,
+): ChallanRecord {
+  const id = String(challan._id)
+
+  return {
+    id,
+    slNumber: challan.slNumber,
+    challanNumber: challan.challanNumber,
+    status: challan.status as ChallanStatus,
+
+    batchId: String(challan.batchId),
+    sourceFileName: challan.sourceFileName,
+    sourcePageStart: challan.sourcePageStart,
+    sourcePageEnd: challan.sourcePageEnd,
+    sourcePageCount: challan.sourcePageEnd - challan.sourcePageStart + 1,
+
+    customerName: challan.customerName,
+    deliveryAddress: challan.deliveryAddress,
+    thana: challan.thana,
+    district: challan.district,
+    receiverMobile: challan.receiverMobile,
+    senderMobile: challan.senderMobile ?? null,
+    zonePo: challan.zonePo ?? null,
+
+    items: toItems(challan),
+    totalQty: totalQtyOf(challan),
+
+    document: {
+      url: '/challans/' + id + '/document',
+      mimeType: 'application/pdf',
+      size: challan.document.size,
+      pageCount: challan.document.pageCount,
+      generatedAt: challan.document.generatedAt.toISOString(),
+    },
+
+    createdBy: actorFrom(challan.createdBy, actorNames),
+    submittedBy: actorFrom(challan.submittedBy, actorNames),
+    updatedBy: actorFrom(challan.updatedBy, actorNames),
+    createdAt: challan.createdAt.toISOString(),
+    updatedAt: challan.updatedAt.toISOString(),
+    submittedAt: challan.submittedAt.toISOString(),
+    amendedAt: toIso(challan.amendedAt),
+  }
+}
+
+export function toChallanBatchRecord(
+  batch: ChallanBatchDocument,
+  actorNames: Map<string, string>,
+): ChallanBatchRecord {
+  const progress = batchProgress([], batch.sourcePageCount, batch.challanCount)
+
+  return {
+    id: String(batch._id),
+    sourceFileName: batch.sourceFileName,
+    sourcePageCount: batch.sourcePageCount,
+    sourceFileSize: batch.sourceFileSize ?? null,
+    status: batch.status as ChallanBatchStatus,
+    challanCount: batch.challanCount,
+    assignedPages: batch.assignedPageCount,
+    unassignedPages: Math.max(batch.sourcePageCount - batch.assignedPageCount, 0),
+    skippedPages: [...batch.skippedPages].sort((a, b) => a - b),
+    percent:
+      batch.sourcePageCount > 0
+        ? Math.round((batch.assignedPageCount / batch.sourcePageCount) * 100)
+        : progress.percent,
+    isComplete: batch.status === 'Completed',
+    completedAt: toIso(batch.completedAt),
+    createdBy: actorFrom(batch.createdBy, actorNames),
+    createdAt: batch.createdAt.toISOString(),
+    updatedAt: batch.updatedAt.toISOString(),
+  }
+}
+
+/**
+ * A batch with its challans, and — the part the batch page exists for — the
+ * pages of the source PDF that still belong to nothing. A batch cannot be
+ * called finished while that list has anything in it, and showing the gaps is
+ * how an operator finds the challan they skipped.
+ */
+export function toChallanBatchDetail(
+  batch: ChallanBatchDocument,
+  challans: ChallanDocument[],
+  actorNames: Map<string, string>,
+): ChallanBatchDetail {
+  const skipped = [...batch.skippedPages].sort((a, b) => a - b)
+
+  /**
+   * A marked-blank page counts as accounted for, so it is fed into the same
+   * gap calculation as a filed challan — otherwise the batch page would keep
+   * asking the operator to deal with pages they have already dealt with.
+   */
+  const claimed = [
+    ...challans.map((challan) => ({
+      startPage: challan.sourcePageStart,
+      endPage: challan.sourcePageEnd,
+    })),
+    ...skipped.map((page) => ({ startPage: page, endPage: page })),
+  ]
+
+  return {
+    ...toChallanBatchRecord(batch, actorNames),
+    challans: challans.map((challan) => toChallanRecord(challan, actorNames)),
+    unassignedRanges: unassignedRanges(claimed, batch.sourcePageCount),
+    // Collapsed the same way, so "pages 7-9 marked blank" reads as one thing.
+    skippedRanges: unassignedRanges(
+      invert(skipped, batch.sourcePageCount),
+      batch.sourcePageCount,
+    ),
+  }
+}
+
+/**
+ * The complement of a page list, as ranges.
+ *
+ * `unassignedRanges` finds the gaps between claimed ranges, so feeding it
+ * everything *except* the skipped pages hands back the skipped pages collapsed
+ * into ranges — one function doing both jobs rather than a second range-merger
+ * that could disagree with the first.
+ */
+function invert(pages: number[], total: number): PageRange[] {
+  const marked = new Set(pages)
+  const kept: PageRange[] = []
+
+  for (let page = 1; page <= total; page += 1) {
+    if (!marked.has(page)) {
+      kept.push({ startPage: page, endPage: page })
+    }
+  }
+
+  return kept
+}
+
+export function toDuplicateCandidate(
+  challan: ChallanDocument,
+  matchedOn: DuplicateChallanCandidate['matchedOn'],
+): DuplicateChallanCandidate {
+  return {
+    id: String(challan._id),
+    slNumber: challan.slNumber,
+    challanNumber: challan.challanNumber,
+    customerName: challan.customerName,
+    deliveryAddress: challan.deliveryAddress,
+    receiverMobile: challan.receiverMobile,
+    product: challan.items[0]?.productName ?? '',
+    model: challan.items[0]?.productModel ?? '',
+    qty: challan.items[0]?.qty ?? 0,
+    moreItems: Math.max(challan.items.length - 1, 0),
+    sourceFileName: challan.sourceFileName,
+    sourcePageStart: challan.sourcePageStart,
+    sourcePageEnd: challan.sourcePageEnd,
+    matchedOn,
+  }
+}

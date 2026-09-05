@@ -147,13 +147,16 @@ export const submitGatePassSchema = z.object({
 export type SubmitGatePassInput = z.infer<typeof submitGatePassSchema>
 
 /**
- * The reviewer's decision. One endpoint serves all three outcomes because each
- * is a move to a target status; which moves are legal is decided by
+ * The reviewer's decision. One endpoint serves both outcomes because each is a
+ * move to a target status; which moves are legal is decided by
  * GATE_PASS_TRANSITIONS, not by the client.
+ *
+ * Withdrawing a record is not one of them. A gate pass that should not exist
+ * is deleted through DELETE /:id rather than moved to a status of its own.
  */
 export const reviewGatePassSchema = z
   .object({
-    status: z.enum(['Verified', 'Rejected', 'Cancelled']),
+    status: z.enum(['Verified', 'Rejected']),
     note: z.string().trim().max(400, 'Note must be 400 characters or fewer').default(''),
   })
   .superRefine((value, ctx) => {
@@ -167,6 +170,37 @@ export const reviewGatePassSchema = z
 export type ReviewGatePassInput = z.infer<typeof reviewGatePassSchema>
 
 /**
+ * What narrows the records list. Shared by the paged list and the spreadsheet
+ * export, so the file an operator downloads is exactly the list they were
+ * looking at — a second copy of these fields would drift the first time one
+ * of them gained a filter the other did not.
+ */
+const gatePassFilterFields = {
+  search: z.string().trim().max(120).default(''),
+  status: z.enum(['all', ...GATE_PASS_STATUSES]).default('all'),
+  csd: z.string().trim().max(24).default(''),
+  unit: z.string().trim().max(24).default(''),
+  product: z.string().trim().max(160).default(''),
+  referenceType: z.enum(['all', ...GATE_PASS_REFERENCE_TYPES]).default('all'),
+  /** Matches whichever of zone or po the record actually carries. */
+  reference: z.string().trim().max(60).default(''),
+  /** An operator's own records; any other id is an Admin or Manager view. */
+  createdBy: z.union([objectId, z.literal('')]).default(''),
+  from: z.string().trim().regex(DATE_ONLY, 'Invalid start date.').or(z.literal('')).default(''),
+  to: z.string().trim().regex(DATE_ONLY, 'Invalid end date.').or(z.literal('')).default(''),
+}
+
+/**
+ * ISO dates compare correctly as strings, which is what makes this a one-line
+ * check rather than two Date allocations.
+ */
+function checkDateOrder(value: { from: string; to: string }, ctx: z.RefinementCtx): void {
+  if (value.from && value.to && value.from > value.to) {
+    ctx.addIssue({ code: 'custom', path: ['to'], message: 'The end date is before the start date.' })
+  }
+}
+
+/**
  * The records list is server-filtered and server-paginated: M0 has no headroom
  * for shipping the collection to the browser and filtering it there. `limit`
  * is capped so a crafted query cannot ask for everything.
@@ -175,27 +209,20 @@ export const listGatePassesQuerySchema = z
   .object({
     page: z.coerce.number().int().min(1).default(1),
     limit: z.coerce.number().int().min(1).max(50).default(10),
-    search: z.string().trim().max(120).default(''),
-    status: z.enum(['all', ...GATE_PASS_STATUSES]).default('all'),
-    csd: z.string().trim().max(24).default(''),
-    unit: z.string().trim().max(24).default(''),
-    product: z.string().trim().max(160).default(''),
-    referenceType: z.enum(['all', ...GATE_PASS_REFERENCE_TYPES]).default('all'),
-    /** Matches whichever of zone or po the record actually carries. */
-    reference: z.string().trim().max(60).default(''),
-    /** An operator's own records; any other id is an Admin or Manager view. */
-    createdBy: z.union([objectId, z.literal('')]).default(''),
-    from: z.string().trim().regex(DATE_ONLY, 'Invalid start date.').or(z.literal('')).default(''),
-    to: z.string().trim().regex(DATE_ONLY, 'Invalid end date.').or(z.literal('')).default(''),
+    ...gatePassFilterFields,
   })
-  .refine(
-    // ISO dates compare correctly as strings, which is what makes this a
-    // one-line check rather than two Date allocations.
-    (value) => !value.from || !value.to || value.from <= value.to,
-    { path: ['to'], message: 'The end date is before the start date.' },
-  )
+  .superRefine(checkDateOrder)
 
 export type ListGatePassesQuery = z.infer<typeof listGatePassesQuerySchema>
+
+/**
+ * The spreadsheet export takes the filters and no page: a download of page one
+ * of four would be a trap. The row ceiling lives in the service, which refuses
+ * a set too large to build rather than silently truncating it.
+ */
+export const exportGatePassesQuerySchema = z.object(gatePassFilterFields).superRefine(checkDateOrder)
+
+export type GatePassFilterQuery = z.infer<typeof exportGatePassesQuerySchema>
 
 /**
  * The duplicate probe the New Gate Pass workspace runs before it submits. It

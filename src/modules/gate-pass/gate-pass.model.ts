@@ -135,7 +135,7 @@ const gatePassSchema = new Schema(
      */
     statusChangedAt: { type: Date, default: null },
     statusChangedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
-    /** Why it was rejected or cancelled. Cleared when the record moves on. */
+    /** Why it was rejected. Cleared when the record moves on. */
     statusNote: { type: String, default: null, trim: true, maxlength: 400 },
 
     // --- Document ---------------------------------------------------------

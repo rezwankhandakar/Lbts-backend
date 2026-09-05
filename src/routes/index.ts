@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { administrationRoutes } from '../modules/administration/administration.route'
+import { challanBatchRoutes, challanRoutes } from '../modules/challan/challan.route'
 import { gatePassRoutes } from '../modules/gate-pass/gate-pass.route'
 import { profileRoutes } from '../modules/profile/profile.route'
 import { userRoutes } from '../modules/user/user.route'
@@ -20,6 +21,14 @@ const routes: RouteDefinition[] = [
   { path: '/profile', route: profileRoutes },
   { path: '/administration', route: administrationRoutes },
   { path: '/gate-passes', route: gatePassRoutes },
+  { path: '/challans', route: challanRoutes },
+  /**
+   * Batches are their own collection rather than a sub-path of a challan: a
+   * batch outlives any one challan in it, and its two reads — the progress of
+   * a source file, and the assembled document for a finished one — are about
+   * the file rather than about a record.
+   */
+  { path: '/challan-batches', route: challanBatchRoutes },
 ]
 
 const router = Router()

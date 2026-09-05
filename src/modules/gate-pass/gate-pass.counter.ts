@@ -1,36 +1,14 @@
-import { Schema, model } from 'mongoose'
+import { nextSequence } from '../../utils/counter'
 
 /**
- * One monotonic counter per key. Used only to allocate gate pass numbers.
+ * Gate pass numbering.
  *
- * The alternative - counting existing records and adding one - races under any
- * concurrency at all and would hand two operators the same number. A single
- * findOneAndUpdate with $inc is atomic in MongoDB, so this is correct without
- * a transaction and costs one indexed write per gate pass.
+ * The counter itself is in `utils/counter.ts` — Mongoose allows exactly one
+ * model per name in a process, and Challan allocates from the same mechanism,
+ * so the model cannot belong to either module. Re-exported here so nothing
+ * that already imported it from this file had to change.
  */
-const counterSchema = new Schema(
-  {
-    _id: { type: String, required: true },
-    value: { type: Number, required: true, default: 0 },
-  },
-  { versionKey: false },
-)
-
-export const CounterModel = model('Counter', counterSchema)
-
-/**
- * The next value for a key, allocated atomically. The document is created on
- * first use, so nothing has to be seeded.
- */
-export async function nextSequence(key: string): Promise<number> {
-  const counter = await CounterModel.findByIdAndUpdate(
-    key,
-    { $inc: { value: 1 } },
-    { new: true, upsert: true },
-  )
-
-  return counter.value
-}
+export { CounterModel, nextSequence } from '../../utils/counter'
 
 /**
  * GP-2026-000123.

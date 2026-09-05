@@ -7,8 +7,8 @@ import {
   MAX_GATE_PASS_PDF_BYTES,
   canTransitionGatePass,
   comparisonKey,
-  isEditableStatus,
   maxBytesFor,
+  needsReverificationAfterEdit,
 } from './gate-pass.constants'
 import type { GatePassStatus } from './gate-pass.constants'
 import type { GatePassDocument } from './gate-pass.model'
@@ -23,9 +23,8 @@ import type { UserRole } from '../user/user.constants'
  */
 
 describe('lifecycle transitions', () => {
-  it('lets a draft be submitted or cancelled, and nothing else', () => {
+  it('lets a draft be submitted, and nothing else', () => {
     assert.equal(canTransitionGatePass('Draft', 'Submitted'), true)
-    assert.equal(canTransitionGatePass('Draft', 'Cancelled'), true)
     assert.equal(canTransitionGatePass('Draft', 'Verified'), false)
     assert.equal(canTransitionGatePass('Draft', 'Rejected'), false)
   })
@@ -40,9 +39,21 @@ describe('lifecycle transitions', () => {
     assert.equal(canTransitionGatePass('Submitted', 'Verified'), true)
   })
 
-  it('treats Cancelled as terminal', () => {
+  it('sends a corrected verification back to be checked again', () => {
+    assert.equal(canTransitionGatePass('Verified', 'Submitted'), true)
+    assert.equal(canTransitionGatePass('Verified', 'Verified'), false)
+    assert.equal(canTransitionGatePass('Verified', 'Rejected'), false)
+  })
+
+  it('has no withdrawn status left to move to', () => {
+    assert.equal(GATE_PASS_STATUSES.includes('Cancelled' as GatePassStatus), false)
+
     for (const status of GATE_PASS_STATUSES) {
-      assert.equal(canTransitionGatePass('Cancelled', status), false, `Cancelled -> ${status}`)
+      assert.equal(
+        canTransitionGatePass(status, 'Cancelled' as GatePassStatus),
+        false,
+        `${status} -> Cancelled`,
+      )
     }
   })
 
@@ -50,12 +61,12 @@ describe('lifecycle transitions', () => {
     assert.equal(canTransitionGatePass('Pending' as GatePassStatus, 'Submitted'), false)
   })
 
-  it('only allows editing while the record is still open', () => {
-    assert.equal(isEditableStatus('Draft'), true)
-    assert.equal(isEditableStatus('Rejected'), true)
-    assert.equal(isEditableStatus('Submitted'), false)
-    assert.equal(isEditableStatus('Verified'), false)
-    assert.equal(isEditableStatus('Cancelled'), false)
+  it('charges a correction only where a verdict would be invalidated', () => {
+    assert.equal(needsReverificationAfterEdit('Verified'), true)
+    // Nothing to invalidate: no reviewer has signed any of these off.
+    assert.equal(needsReverificationAfterEdit('Draft'), false)
+    assert.equal(needsReverificationAfterEdit('Submitted'), false)
+    assert.equal(needsReverificationAfterEdit('Rejected'), false)
   })
 })
 
@@ -166,17 +177,24 @@ describe('record visibility', () => {
 
 describe('edit and delete rules', () => {
   const admin = userStub('admin1', 'Admin')
+  const reviewer = userStub('manager1', 'Manager')
   const opex = userStub('opex1', 'OpEx')
   const otherOpex = userStub('opex2', 'OpEx')
 
-  it('lets an operator edit their own open record', () => {
-    assert.doesNotThrow(() => assertCanEdit(recordStub('opex1', 'Draft'), opex))
-    assert.doesNotThrow(() => assertCanEdit(recordStub('opex1', 'Rejected'), opex))
+  it('lets an operator correct their own record in any status', () => {
+    // A transcription error is worth fixing whenever it is spotted; what a
+    // late correction costs is needsReverificationAfterEdit's business, not
+    // a reason to refuse the edit.
+    for (const status of GATE_PASS_STATUSES) {
+      assert.doesNotThrow(() => assertCanEdit(recordStub('opex1', status), opex), status)
+    }
   })
 
-  it('refuses to edit a record that has left the operator', () => {
-    assert.throws(() => assertCanEdit(recordStub('opex1', 'Submitted'), opex), /cannot be edited/)
-    assert.throws(() => assertCanEdit(recordStub('opex1', 'Verified'), opex), /cannot be edited/)
+  it('lets Admin and Manager correct anybody’s record in any status', () => {
+    for (const status of GATE_PASS_STATUSES) {
+      assert.doesNotThrow(() => assertCanEdit(recordStub('opex1', status), admin), status)
+      assert.doesNotThrow(() => assertCanEdit(recordStub('opex1', status), reviewer), status)
+    }
   })
 
   it('refuses to edit work created by somebody else', () => {
@@ -187,10 +205,19 @@ describe('edit and delete rules', () => {
     )
   })
 
-  it('only ever deletes a draft', () => {
-    assert.doesNotThrow(() => assertCanDelete(recordStub('opex1', 'Draft'), opex))
-    assert.throws(() => assertCanDelete(recordStub('opex1', 'Submitted'), admin), /Cancel this/)
-    assert.throws(() => assertCanDelete(recordStub('opex1', 'Verified'), admin), /Cancel this/)
+  it('lets an operator delete their own record in any status', () => {
+    // Withdrawing is a delete now, so a mistake noticed after verification is
+    // still removable — by the person who filed it.
+    for (const status of GATE_PASS_STATUSES) {
+      assert.doesNotThrow(() => assertCanDelete(recordStub('opex1', status), opex), status)
+    }
+  })
+
+  it("lets Admin and Manager delete anybody's record in any status", () => {
+    for (const status of GATE_PASS_STATUSES) {
+      assert.doesNotThrow(() => assertCanDelete(recordStub('opex1', status), admin), status)
+      assert.doesNotThrow(() => assertCanDelete(recordStub('opex1', status), reviewer), status)
+    }
   })
 
   it('will not let one operator delete a draft created by another', () => {

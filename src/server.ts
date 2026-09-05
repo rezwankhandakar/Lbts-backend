@@ -8,7 +8,11 @@ import {
   registerConnectionEvents,
 } from './config/db'
 import { ensureDnsResolvers } from './config/dns'
-import { foldLegacyGatePassProducts } from './modules/gate-pass/gate-pass.migration'
+import { foldLegacyChallanProducts } from './modules/challan/challan.migration'
+import {
+  foldLegacyGatePassProducts,
+  purgeCancelledGatePasses,
+} from './modules/gate-pass/gate-pass.migration'
 import { normalizeLegacyUserRecords } from './modules/user/user.migration'
 
 let server: Server | undefined
@@ -66,6 +70,13 @@ function start(): void {
     // Gate passes written before a challan could carry several product lines
     // still hold one product on the record itself, where nothing can read it.
     void foldLegacyGatePassProducts()
+    // Withdrawing a gate pass is a delete now, so records parked in the
+    // retired Cancelled status hold a value the schema no longer accepts.
+    void purgeCancelledGatePasses()
+    // Challans written before one could carry several product lines still hold
+    // a single product on the record itself, where nothing can read it — and
+    // where its quantity drops out of every total the list reports.
+    void foldLegacyChallanProducts()
   })
 
   process.on('SIGTERM', () => shutdown('SIGTERM'))

@@ -2,8 +2,7 @@ import type { QueryFilter } from 'mongoose'
 import { AppError } from '../../utils/app-error'
 import type { UserRole } from '../user/user.constants'
 import type { UserDocument } from '../user/user.model'
-import { canManageAnyGatePass, isEditableStatus } from './gate-pass.constants'
-import type { GatePassStatus } from './gate-pass.constants'
+import { canManageAnyGatePass } from './gate-pass.constants'
 import type { GatePass, GatePassDocument } from './gate-pass.model'
 
 /**
@@ -59,9 +58,15 @@ export function canViewRecord(gatePass: GatePassDocument, actor: UserDocument): 
 }
 
 /**
- * Editing means changing what the gate pass says. That is the author's job
- * while the record is still open, and a manager's job when they are correcting
- * somebody else's work.
+ * Editing means changing what the gate pass says, or replacing the scan it was
+ * read from. That is the author's job on their own records, and a manager's
+ * job when they are correcting somebody else's work.
+ *
+ * Status is deliberately not a condition. A vehicle number transcribed wrongly
+ * is wrong whether it is noticed in a draft or a fortnight after verification,
+ * and a record nobody may correct is a record nobody can trust. What a late
+ * correction costs is decided elsewhere: `needsReverificationAfterEdit` sends
+ * a verified record back to be checked against what it now says.
  *
  * The 404 for a record the viewer cannot even see is deliberate: telling an
  * operator that GP-2026-000123 exists but is not theirs is more information
@@ -75,13 +80,6 @@ export function assertCanEdit(gatePass: GatePassDocument, actor: UserDocument): 
   if (!managesAnyRecord(actor) && !ownsRecord(gatePass, actor)) {
     throw new AppError(403, 'You can only change gate passes you created.')
   }
-
-  if (!isEditableStatus(gatePass.status as GatePassStatus)) {
-    throw new AppError(
-      409,
-      `A ${gatePass.status} gate pass cannot be edited. Cancel it and create a new one.`,
-    )
-  }
 }
 
 /** Reading one record, including its scanned document. */
@@ -92,21 +90,29 @@ export function assertCanView(gatePass: GatePassDocument, actor: UserDocument): 
 }
 
 /**
- * Deleting is confined to a Draft, and to the person who created it or an
- * administrator. Anything that has been submitted is part of the operating
- * record and is cancelled rather than removed — a gate pass that vanishes is
- * indistinguishable from one that never existed.
+ * Deleting is how a gate pass that should not exist leaves the system. It
+ * replaces the withdrawn status this module used to carry: a record parked in
+ * "cancelled" is one every list, count and duplicate probe has to remember to
+ * exclude, and one an operator still has to scroll past.
+ *
+ * Status is deliberately not a condition here. A wrong gate pass is wrong
+ * whether it was noticed while still a draft or after a reviewer verified it,
+ * and refusing the later case only produces a record nobody trusts.
+ *
+ * Who, rather than when, is the rule: the author removes their own work at any
+ * point in its life, and Admin and Manager — the roles that already see and
+ * act on everything — remove anybody's.
+ *
+ * The 404 for a record the actor cannot see is the same reasoning as
+ * assertCanEdit: an operator does not learn that somebody else's draft exists
+ * by trying to delete it.
  */
 export function assertCanDelete(gatePass: GatePassDocument, actor: UserDocument): void {
   if (!canViewRecord(gatePass, actor)) {
     throw new AppError(404, 'Gate pass not found.')
   }
 
-  if (gatePass.status !== 'Draft') {
-    throw new AppError(409, 'Only a draft can be deleted. Cancel this gate pass instead.')
-  }
-
-  if (roleOf(actor) !== 'Admin' && !ownsRecord(gatePass, actor)) {
-    throw new AppError(403, 'You can only delete drafts you created.')
+  if (!managesAnyRecord(actor) && !ownsRecord(gatePass, actor)) {
+    throw new AppError(403, 'You can only delete gate passes you created.')
   }
 }

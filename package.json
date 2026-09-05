@@ -7,14 +7,16 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "lint": "eslint .",
-    "test": "tsx --test src/modules/gate-pass/gate-pass.validation.test.ts src/modules/gate-pass/gate-pass.domain.test.ts"
+    "test": "tsx --test \"src/modules/**/*.test.ts\""
   },
   "type": "commonjs",
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1125.0",
+    "bijoy2unicode": "^1.0.2",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
+    "exceljs": "^4.4.0",
     "express": "^5.2.1",
     "express-rate-limit": "^8.7.0",
     "firebase-admin": "^14.3.0",
@@ -22,6 +24,7 @@
     "mongoose": "^9.9.4",
     "morgan": "^1.12.0",
     "multer": "^2.3.0",
+    "pdf-lib": "^1.17.1",
     "sharp": "^0.35.4",
     "zod": "^4.5.4"
   },

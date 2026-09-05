@@ -5,6 +5,12 @@ export interface ResponseMeta {
   limit: number
   total: number
   totalPages: number
+  /**
+   * A total the list is itself about, summed over every matching record rather
+   * than the page on screen — Gate Pass sends the quantity carried by the
+   * filtered set. Optional, because most lists count rows and nothing else.
+   */
+  totalQty?: number
 }
 
 interface SuccessPayload<T> {
