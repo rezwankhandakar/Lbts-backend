@@ -1,11 +1,12 @@
-import { Router } from 'express'
-import rateLimit from 'express-rate-limit'
-import { auth, requireRole } from '../../middlewares/auth'
-import { requireDb } from '../../middlewares/require-db'
-import { uploadChallanPages } from '../../middlewares/upload'
-import { validateRequest } from '../../middlewares/validate-request'
-import type { UserRole } from '../user/user.constants'
-import { CHALLAN_READ_ROLES, CHALLAN_WRITE_ROLES } from './challan.constants'
+import { Router } from "express";
+import rateLimit from "express-rate-limit";
+import { auth, requireRole } from "../../middlewares/auth";
+import { requireDb } from "../../middlewares/require-db";
+import { uploadChallanPages } from "../../middlewares/upload";
+import { validateRequest } from "../../middlewares/validate-request";
+import { setChallanLocationSchema } from "../location/location.validation";
+import type { UserRole } from "../user/user.constants";
+import { CHALLAN_READ_ROLES, CHALLAN_WRITE_ROLES } from "./challan.constants";
 import {
   deleteChallan,
   getBatchDownload,
@@ -18,10 +19,13 @@ import {
   getPageRange,
   getStats,
   getSuggestions,
+  patchBatchPrinted,
   patchBatchSkippedPages,
   patchChallan,
+  patchChallanLocation,
+  patchChallanPrinted,
   postChallan,
-} from './challan.controller'
+} from "./challan.controller";
 import {
   batchIdParamSchema,
   challanIdParamSchema,
@@ -29,11 +33,12 @@ import {
   listBatchesQuerySchema,
   listChallansQuerySchema,
   pageRangeQuerySchema,
+  printedSchema,
   skippedPagesSchema,
   submitChallanSchema,
   suggestionQuerySchema,
   updateChallanSchema,
-} from './challan.validation'
+} from "./challan.validation";
 
 /**
  * Challan records the paperwork that arrives from the corporate office, so who
@@ -48,22 +53,42 @@ import {
  * the profile rather than from the token, so a role change takes effect on the
  * very next request. requireRole already includes requireActiveAccount.
  */
-const challanRouter = Router()
+const challanRouter = Router();
 
-challanRouter.use(requireDb, auth, requireRole(...(CHALLAN_READ_ROLES as UserRole[])))
+challanRouter.use(
+  requireDb,
+  auth,
+  requireRole(...(CHALLAN_READ_ROLES as UserRole[])),
+);
 
-const canWrite = requireRole(...(CHALLAN_WRITE_ROLES as UserRole[]))
+const canWrite = requireRole(...(CHALLAN_WRITE_ROLES as UserRole[]));
 
 /**
  * Declared before `/:id`, or Express matches these as an id and the parameter
  * schema rejects them with an unhelpful 400.
  */
-challanRouter.get('/stats', getStats)
-challanRouter.get('/suggestions', validateRequest({ query: suggestionQuerySchema }), getSuggestions)
-challanRouter.get('/duplicates', validateRequest({ query: duplicateQuerySchema }), getDuplicates)
-challanRouter.get('/page-range', validateRequest({ query: pageRangeQuerySchema }), getPageRange)
+challanRouter.get("/stats", getStats);
+challanRouter.get(
+  "/suggestions",
+  validateRequest({ query: suggestionQuerySchema }),
+  getSuggestions,
+);
+challanRouter.get(
+  "/duplicates",
+  validateRequest({ query: duplicateQuerySchema }),
+  getDuplicates,
+);
+challanRouter.get(
+  "/page-range",
+  validateRequest({ query: pageRangeQuerySchema }),
+  getPageRange,
+);
 
-challanRouter.get('/', validateRequest({ query: listChallansQuerySchema }), getChallans)
+challanRouter.get(
+  "/",
+  validateRequest({ query: listChallansQuerySchema }),
+  getChallans,
+);
 
 /**
  * Filing a challan.
@@ -82,51 +107,101 @@ challanRouter.get('/', validateRequest({ query: listChallansQuerySchema }), getC
 const submitLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 120,
-  standardHeaders: 'draft-7',
+  standardHeaders: "draft-7",
   legacyHeaders: false,
   message: {
     success: false,
-    message: 'Too many submissions. Please try again in a few minutes.',
-    errorSources: [{ path: 'submission', message: 'Submission rate limit exceeded.' }],
+    message: "Too many submissions. Please try again in a few minutes.",
+    errorSources: [
+      { path: "submission", message: "Submission rate limit exceeded." },
+    ],
   },
-})
+});
 
 challanRouter.post(
-  '/',
+  "/",
   canWrite,
   submitLimiter,
   uploadChallanPages,
   validateRequest({ body: submitChallanSchema }),
   postChallan,
-)
+);
 
-challanRouter.get('/:id', validateRequest({ params: challanIdParamSchema }), getOne)
+challanRouter.get(
+  "/:id",
+  validateRequest({ params: challanIdParamSchema }),
+  getOne,
+);
 
 challanRouter.patch(
-  '/:id',
+  "/:id",
   canWrite,
   validateRequest({ params: challanIdParamSchema, body: updateChallanSchema }),
   patchChallan,
-)
+);
 
 challanRouter.delete(
-  '/:id',
+  "/:id",
   canWrite,
   validateRequest({ params: challanIdParamSchema }),
   deleteChallan,
-)
+);
 
-challanRouter.get('/:id/document', validateRequest({ params: challanIdParamSchema }), getDocument)
+/**
+ * Recording that a challan was printed.
+ *
+ * A write, so it takes the write roles — but deliberately *not* scoped to the
+ * challan's author the way correcting and deleting one are. Those change what
+ * the record says about a delivery; this says what came out of a printer, and
+ * whoever is at the printer is the person who knows. `CEO` is left out
+ * because it writes nothing anywhere in this module; a CEO can still print,
+ * the mark simply is not theirs to make.
+ */
+challanRouter.patch(
+  "/:id/printed",
+  canWrite,
+  validateRequest({ params: challanIdParamSchema, body: printedSchema }),
+  patchChallanPrinted,
+);
 
-export const challanRoutes = challanRouter
+/**
+ * Setting a filed challan's district and thana by hand.
+ *
+ * The write roles, and then `assertCanEdit` in the service — the same boundary
+ * as every other correction in this module, so an Operation Executive fixes
+ * the location on their own challans and Admin and Manager fix anybody's. It
+ * is deliberately not widened to everyone the way the print mark is: the print
+ * mark says what came out of a printer, and this says where a delivery went.
+ */
+challanRouter.patch(
+  "/:id/location",
+  canWrite,
+  validateRequest({
+    params: challanIdParamSchema,
+    body: setChallanLocationSchema,
+  }),
+  patchChallanLocation,
+);
+
+challanRouter.get(
+  "/:id/document",
+  validateRequest({ params: challanIdParamSchema }),
+  getDocument,
+);
+
+export const challanRoutes = challanRouter;
 
 // ---------------------------------------------------------------------------
 // Batches
 // ---------------------------------------------------------------------------
 
-const batchRouter = Router()
+const batchRouter = Router();
 
-batchRouter.use(requireDb, auth, requireRole(...(CHALLAN_READ_ROLES as UserRole[])))
+batchRouter.use(
+  requireDb,
+  auth,
+  requireRole(...(CHALLAN_READ_ROLES as UserRole[])),
+);
 
 /**
  * Assembling a completed batch is the most expensive read in the module by a
@@ -139,17 +214,27 @@ batchRouter.use(requireDb, auth, requireRole(...(CHALLAN_READ_ROLES as UserRole[
 const batchDownloadLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   limit: 12,
-  standardHeaders: 'draft-7',
+  standardHeaders: "draft-7",
   legacyHeaders: false,
   message: {
     success: false,
-    message: 'Too many batch downloads. Please try again in a few minutes.',
-    errorSources: [{ path: 'batch', message: 'Batch download rate limit exceeded.' }],
+    message: "Too many batch downloads. Please try again in a few minutes.",
+    errorSources: [
+      { path: "batch", message: "Batch download rate limit exceeded." },
+    ],
   },
-})
+});
 
-batchRouter.get('/', validateRequest({ query: listBatchesQuerySchema }), getBatches)
-batchRouter.get('/:id', validateRequest({ params: batchIdParamSchema }), getBatchOne)
+batchRouter.get(
+  "/",
+  validateRequest({ query: listBatchesQuerySchema }),
+  getBatches,
+);
+batchRouter.get(
+  "/:id",
+  validateRequest({ params: batchIdParamSchema }),
+  getBatchOne,
+);
 
 /**
  * Marking pages of the source PDF as not being challans. A write, so it takes
@@ -157,16 +242,28 @@ batchRouter.get('/:id', validateRequest({ params: batchIdParamSchema }), getBatc
  * statement about a file only one person ever had is theirs to make.
  */
 batchRouter.patch(
-  '/:id/skipped-pages',
+  "/:id/skipped-pages",
   requireRole(...(CHALLAN_WRITE_ROLES as UserRole[])),
   validateRequest({ params: batchIdParamSchema, body: skippedPagesSchema }),
   patchBatchSkippedPages,
-)
+);
+/**
+ * The same for a whole batch, following a batch print. One statement about
+ * fifteen challans that genuinely were printed together, rather than fifteen
+ * chances to lose count.
+ */
+batchRouter.patch(
+  "/:id/printed",
+  requireRole(...(CHALLAN_WRITE_ROLES as UserRole[])),
+  validateRequest({ params: batchIdParamSchema, body: printedSchema }),
+  patchBatchPrinted,
+);
+
 batchRouter.get(
-  '/:id/download',
+  "/:id/download",
   batchDownloadLimiter,
   validateRequest({ params: batchIdParamSchema }),
   getBatchDownload,
-)
+);
 
-export const challanBatchRoutes = batchRouter
+export const challanBatchRoutes = batchRouter;

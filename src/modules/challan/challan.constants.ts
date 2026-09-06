@@ -1,4 +1,4 @@
-import type { UserRole } from '../user/user.constants'
+import type { UserRole } from "../user/user.constants";
 
 /**
  * The single source of truth for the Challan vocabulary. The frontend mirrors
@@ -26,10 +26,10 @@ import type { UserRole } from '../user/user.constants'
  * Saying so on the record is what stops "the document matches the data" from
  * being an assumption nobody can check.
  */
-export const CHALLAN_STATUSES = ['Submitted', 'Amended'] as const
-export type ChallanStatus = (typeof CHALLAN_STATUSES)[number]
+export const CHALLAN_STATUSES = ["Submitted", "Amended"] as const;
+export type ChallanStatus = (typeof CHALLAN_STATUSES)[number];
 
-export const INITIAL_CHALLAN_STATUS: ChallanStatus = 'Submitted'
+export const INITIAL_CHALLAN_STATUS: ChallanStatus = "Submitted";
 
 /**
  * A source batch: one WhatsApp PDF, and the challans cut out of it.
@@ -41,8 +41,8 @@ export const INITIAL_CHALLAN_STATUS: ChallanStatus = 'Submitted'
  * arithmetic: a batch is Completed exactly when every page of the source PDF
  * belongs to a submitted challan.
  */
-export const CHALLAN_BATCH_STATUSES = ['Processing', 'Completed'] as const
-export type ChallanBatchStatus = (typeof CHALLAN_BATCH_STATUSES)[number]
+export const CHALLAN_BATCH_STATUSES = ["Processing", "Completed"] as const;
+export type ChallanBatchStatus = (typeof CHALLAN_BATCH_STATUSES)[number];
 
 /**
  * Module-level permissions, configured here because that is what CLAUDE.md
@@ -54,17 +54,29 @@ export type ChallanBatchStatus = (typeof CHALLAN_BATCH_STATUSES)[number]
  * and an external supplier has no business reading one. `CEO` reads everything
  * and writes nothing.
  */
-export const CHALLAN_READ_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
-export const CHALLAN_WRITE_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'OpEx']
+export const CHALLAN_READ_ROLES: readonly UserRole[] = [
+  "Admin",
+  "Manager",
+  "CEO",
+  "OpEx",
+];
+export const CHALLAN_WRITE_ROLES: readonly UserRole[] = [
+  "Admin",
+  "Manager",
+  "OpEx",
+];
 
 /**
  * Roles that may correct or remove a challan somebody else filed. Everyone
  * else is scoped to their own work.
  */
-export const CHALLAN_MANAGE_ANY_ROLES: readonly UserRole[] = ['Admin', 'Manager']
+export const CHALLAN_MANAGE_ANY_ROLES: readonly UserRole[] = [
+  "Admin",
+  "Manager",
+];
 
 export function canManageAnyChallan(role: UserRole): boolean {
-  return CHALLAN_MANAGE_ANY_ROLES.includes(role)
+  return CHALLAN_MANAGE_ANY_ROLES.includes(role);
 }
 
 /**
@@ -76,8 +88,8 @@ export function canManageAnyChallan(role: UserRole): boolean {
  * pages of one challan; three or four is normal and twenty is a page range
  * somebody selected by accident.
  */
-export const MAX_SOURCE_PAGES = 500
-export const MAX_CHALLAN_PAGES = 25
+export const MAX_SOURCE_PAGES = 500;
+export const MAX_CHALLAN_PAGES = 25;
 
 /**
  * The extracted front pages, as they arrive on a submission. Small on purpose:
@@ -85,7 +97,7 @@ export const MAX_CHALLAN_PAGES = 25
  * A 15 MB extract is a sign the whole file was sent, and refusing it protects
  * a 512 MB instance from building a merged document on top of it.
  */
-export const MAX_CHALLAN_UPLOAD_BYTES = 15 * 1024 * 1024
+export const MAX_CHALLAN_UPLOAD_BYTES = 15 * 1024 * 1024;
 
 /**
  * Product rows one challan may carry.
@@ -96,13 +108,13 @@ export const MAX_CHALLAN_UPLOAD_BYTES = 15 * 1024 * 1024
  * nothing is not a challan; the ceiling is a sanity limit on a request body
  * rather than a business rule.
  */
-export const MAX_CHALLAN_ITEMS = 30
+export const MAX_CHALLAN_ITEMS = 30;
 
 /** How many challans one batch PDF may merge before it is refused outright. */
-export const MAX_BATCH_MERGE_CHALLANS = 200
+export const MAX_BATCH_MERGE_CHALLANS = 200;
 
 /** Rows one list page may return, and the ceiling on an export. */
-export const MAX_CHALLAN_PAGE_SIZE = 50
+export const MAX_CHALLAN_PAGE_SIZE = 50;
 
 /**
  * The comparison key for values an operator copies out of a PDF.
@@ -113,7 +125,7 @@ export const MAX_CHALLAN_PAGE_SIZE = 50
  * stored key rather than rewriting the field.
  */
 export function comparisonKey(value: string): string {
-  return value.toUpperCase().replace(/[^A-Z0-9\u0980-\u09FF]/g, '')
+  return value.toUpperCase().replace(/[^A-Z0-9\u0980-\u09FF]/g, "");
 }
 
 /**
@@ -126,19 +138,19 @@ export function comparisonKey(value: string): string {
  * number is worse than storing what was on the paper.
  */
 export function normalizeMobile(value: string): string {
-  const digits = value.replace(/[^\d]/g, '')
+  const digits = value.replace(/[^\d]/g, "");
 
   if (/^01\d{9}$/.test(digits)) {
-    return digits
+    return digits;
   }
   if (/^8801\d{9}$/.test(digits)) {
-    return digits.slice(2)
+    return digits.slice(2);
   }
 
-  return value.trim().replace(/\s+/g, ' ')
+  return value.trim().replace(/\s+/g, " ");
 }
 
 /** True for the eleven-digit local form this system stores. */
 export function isNormalizedMobile(value: string): boolean {
-  return /^01\d{9}$/.test(value)
+  return /^01\d{9}$/.test(value);
 }

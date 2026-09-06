@@ -1,5 +1,5 @@
-import { Schema, model } from 'mongoose'
-import type { InferSchemaType } from 'mongoose'
+import { Schema, model } from "mongoose";
+import type { InferSchemaType } from "mongoose";
 
 /**
  * The claim that stops one challan being filed twice.
@@ -35,14 +35,19 @@ const challanSubmissionSchema = new Schema(
   {
     /** The idempotency key itself, so the unique index is free. */
     _id: { type: String, required: true },
-    status: { type: String, enum: ['pending', 'completed'], required: true, default: 'pending' },
+    status: {
+      type: String,
+      enum: ["pending", "completed"],
+      required: true,
+      default: "pending",
+    },
     /** Set when the work finishes; the record a replay is answered with. */
-    challanId: { type: Schema.Types.ObjectId, ref: 'Challan', default: null },
-    createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    challanId: { type: Schema.Types.ObjectId, ref: "Challan", default: null },
+    createdBy: { type: Schema.Types.ObjectId, ref: "User", required: true },
     createdAt: { type: Date, required: true, default: () => new Date() },
   },
   { versionKey: false },
-)
+);
 
 /**
  * Claims are swept after a day.
@@ -53,10 +58,18 @@ const challanSubmissionSchema = new Schema(
  * TTL keeps the collection at roughly a day's submissions on an M0 cluster
  * with little room to spare.
  */
-challanSubmissionSchema.index({ createdAt: 1 }, { expireAfterSeconds: 24 * 60 * 60 })
+challanSubmissionSchema.index(
+  { createdAt: 1 },
+  { expireAfterSeconds: 24 * 60 * 60 },
+);
 
-export type ChallanSubmission = InferSchemaType<typeof challanSubmissionSchema>
+export type ChallanSubmission = InferSchemaType<typeof challanSubmissionSchema>;
 
-export const ChallanSubmissionModel = model('ChallanSubmission', challanSubmissionSchema)
+export const ChallanSubmissionModel = model(
+  "ChallanSubmission",
+  challanSubmissionSchema,
+);
 
-export type ChallanSubmissionDocument = InstanceType<typeof ChallanSubmissionModel>
+export type ChallanSubmissionDocument = InstanceType<
+  typeof ChallanSubmissionModel
+>;

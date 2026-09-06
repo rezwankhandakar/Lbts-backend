@@ -1,4 +1,4 @@
-import { nextSequence } from '../../utils/counter'
+import { nextSequence } from "../../utils/counter";
 
 /**
  * The two identifiers a submitted challan is given, both allocated by the
@@ -26,11 +26,11 @@ import { nextSequence } from '../../utils/counter'
  * page. The offset is applied to the counter rather than seeded into it, so
  * the counter itself stays a plain count of challans ever filed.
  */
-export const SL_NUMBER_BASE = 10_000
+export const SL_NUMBER_BASE = 10_000;
 
 /** The next serial. Globally unique across every year and every batch. */
 export async function allocateSlNumber(): Promise<number> {
-  return SL_NUMBER_BASE + (await nextSequence('challan:sl'))
+  return SL_NUMBER_BASE + (await nextSequence("challan:sl"));
 }
 
 /**
@@ -42,16 +42,18 @@ export async function allocateSlNumber(): Promise<number> {
  * million challans in a year; past that the number simply grows a digit rather
  * than wrapping.
  */
-export async function allocateChallanNumber(now: Date = new Date()): Promise<string> {
-  const year = now.getUTCFullYear()
-  const sequence = await nextSequence('challan:' + year)
-  return 'LBTS-CH-' + year + '-' + String(sequence).padStart(6, '0')
+export async function allocateChallanNumber(
+  now: Date = new Date(),
+): Promise<string> {
+  const year = now.getUTCFullYear();
+  const sequence = await nextSequence("challan:" + year);
+  return "LBTS-CH-" + year + "-" + String(sequence).padStart(6, "0");
 }
 
 /** Both, in one place, because a challan is never given one without the other. */
 export interface ChallanIdentifiers {
-  slNumber: number
-  challanNumber: string
+  slNumber: number;
+  challanNumber: string;
 }
 
 export async function allocateChallanIdentifiers(
@@ -60,7 +62,7 @@ export async function allocateChallanIdentifiers(
   const [slNumber, challanNumber] = await Promise.all([
     allocateSlNumber(),
     allocateChallanNumber(now),
-  ])
+  ]);
 
-  return { slNumber, challanNumber }
+  return { slNumber, challanNumber };
 }

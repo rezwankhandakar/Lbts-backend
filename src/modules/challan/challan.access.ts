@@ -1,8 +1,8 @@
-import { AppError } from '../../utils/app-error'
-import type { UserRole } from '../user/user.constants'
-import type { UserDocument } from '../user/user.model'
-import { canManageAnyChallan } from './challan.constants'
-import type { ChallanDocument } from './challan.model'
+import { AppError } from "../../utils/app-error";
+import type { UserRole } from "../user/user.constants";
+import type { UserDocument } from "../user/user.model";
+import { canManageAnyChallan } from "./challan.constants";
+import type { ChallanDocument } from "./challan.model";
 
 /**
  * Who may act on which challan.
@@ -24,16 +24,19 @@ import type { ChallanDocument } from './challan.model'
  */
 
 function roleOf(actor: UserDocument): UserRole {
-  return actor.role as UserRole
+  return actor.role as UserRole;
 }
 
 /** True for Admin and Manager: the two roles that act on everything. */
 export function managesAnyRecord(actor: UserDocument): boolean {
-  return canManageAnyChallan(roleOf(actor))
+  return canManageAnyChallan(roleOf(actor));
 }
 
-export function ownsRecord(challan: ChallanDocument, actor: UserDocument): boolean {
-  return String(challan.createdBy) === String(actor._id)
+export function ownsRecord(
+  challan: ChallanDocument,
+  actor: UserDocument,
+): boolean {
+  return String(challan.createdBy) === String(actor._id);
 }
 
 /**
@@ -45,9 +48,12 @@ export function ownsRecord(challan: ChallanDocument, actor: UserDocument): boole
  * correction costs is a regenerated back page and a regenerated document —
  * handled in the service, not a reason to refuse the edit.
  */
-export function assertCanEdit(challan: ChallanDocument, actor: UserDocument): void {
+export function assertCanEdit(
+  challan: ChallanDocument,
+  actor: UserDocument,
+): void {
   if (!managesAnyRecord(actor) && !ownsRecord(challan, actor)) {
-    throw new AppError(403, 'You can only correct challans you filed.')
+    throw new AppError(403, "You can only correct challans you filed.");
   }
 }
 
@@ -65,11 +71,11 @@ export function assertCanChangeBatch(
   actor: UserDocument,
 ): void {
   if (managesAnyRecord(actor)) {
-    return
+    return;
   }
 
   if (String(batch.createdBy) !== String(actor._id)) {
-    throw new AppError(403, 'You can only change batches you started.')
+    throw new AppError(403, "You can only change batches you started.");
   }
 }
 
@@ -80,8 +86,11 @@ export function assertCanChangeBatch(
  * exist — the wrong page range, a sheet filed twice — is wrong whenever it is
  * noticed, and who filed it is the question, not when.
  */
-export function assertCanDelete(challan: ChallanDocument, actor: UserDocument): void {
+export function assertCanDelete(
+  challan: ChallanDocument,
+  actor: UserDocument,
+): void {
   if (!managesAnyRecord(actor) && !ownsRecord(challan, actor)) {
-    throw new AppError(403, 'You can only delete challans you filed.')
+    throw new AppError(403, "You can only delete challans you filed.");
   }
 }

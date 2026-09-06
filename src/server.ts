@@ -8,7 +8,11 @@ import {
   registerConnectionEvents,
 } from './config/db'
 import { ensureDnsResolvers } from './config/dns'
-import { foldLegacyChallanProducts } from './modules/challan/challan.migration'
+import {
+  backfillChallanLocations,
+  foldLegacyChallanProducts,
+} from './modules/challan/challan.migration'
+import { seedLocationMaster } from './modules/location/location.seed'
 import {
   foldLegacyGatePassProducts,
   purgeCancelledGatePasses,
@@ -77,6 +81,13 @@ function start(): void {
     // a single product on the record itself, where nothing can read it — and
     // where its quantity drops out of every total the list reports.
     void foldLegacyChallanProducts()
+    /**
+     * The district/thana master list, and then the challans filed before it
+     * existed. Sequential on purpose: the backfill matches against the
+     * collection the seeder fills, so starting both at once would have it
+     * match against an empty one.
+     */
+    void seedLocationMaster().then(() => backfillChallanLocations())
   })
 
   process.on('SIGTERM', () => shutdown('SIGTERM'))

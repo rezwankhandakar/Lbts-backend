@@ -1,8 +1,9 @@
-import { pipeline } from 'node:stream/promises'
-import type { Request, Response } from 'express'
-import { AppError } from '../../utils/app-error'
-import { sendResponse } from '../../utils/send-response'
-import type { UserDocument } from '../user/user.model'
+import { pipeline } from "node:stream/promises";
+import type { Request, Response } from "express";
+import { AppError } from "../../utils/app-error";
+import { sendResponse } from "../../utils/send-response";
+import type { SetChallanLocationInput } from "../location/location.validation";
+import type { UserDocument } from "../user/user.model";
 import {
   ChallanAlreadySubmitted,
   DuplicateChallanError,
@@ -18,21 +19,25 @@ import {
   listChallans,
   readChallanDocumentStream,
   removeChallan,
+  setBatchPrinted,
   setBatchSkippedPages,
+  setChallanLocation,
+  setChallanPrinted,
   submitChallan,
   suggestChallanValues,
   updateChallan,
-} from './challan.service'
+} from "./challan.service";
 import type {
   ChallanSuggestionQuery,
   DuplicateQuery,
   ListBatchesQuery,
   ListChallansQuery,
   PageRangeQuery,
+  PrintedInput,
   SkippedPagesInput,
   SubmitChallanInput,
   UpdateChallanInput,
-} from './challan.validation'
+} from "./challan.validation";
 
 /**
  * The authenticated profile. Every handler here runs behind requireDb, auth
@@ -42,26 +47,26 @@ import type {
  */
 function actorFrom(req: Request): UserDocument {
   if (!req.user) {
-    throw new AppError(403, 'Profile not found. Sync the account first.')
+    throw new AppError(403, "Profile not found. Sync the account first.");
   }
-  return req.user
+  return req.user;
 }
 
 function idFrom(req: Request): string {
-  const params = req.validated?.params as { id: string } | undefined
+  const params = req.validated?.params as { id: string } | undefined;
   if (!params) {
-    throw new AppError(400, 'Invalid id.')
+    throw new AppError(400, "Invalid id.");
   }
-  return params.id
+  return params.id;
 }
 
 export async function getChallans(req: Request, res: Response): Promise<void> {
-  const query = req.validated?.query as ListChallansQuery
-  const { records, total, totalQty } = await listChallans(query)
+  const query = req.validated?.query as ListChallansQuery;
+  const { records, total, totalQty } = await listChallans(query);
 
   sendResponse(res, {
     statusCode: 200,
-    message: 'Challans retrieved',
+    message: "Challans retrieved",
     data: records,
     meta: {
       page: query.page,
@@ -72,35 +77,41 @@ export async function getChallans(req: Request, res: Response): Promise<void> {
       // question it answers is about the filters and not about the scroll.
       totalQty,
     },
-  })
+  });
 }
 
 export async function getStats(_req: Request, res: Response): Promise<void> {
   sendResponse(res, {
     statusCode: 200,
-    message: 'Challan statistics retrieved',
+    message: "Challan statistics retrieved",
     data: await getChallanStats(),
-  })
+  });
 }
 
-export async function getSuggestions(req: Request, res: Response): Promise<void> {
-  const query = req.validated?.query as ChallanSuggestionQuery
+export async function getSuggestions(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const query = req.validated?.query as ChallanSuggestionQuery;
 
   sendResponse(res, {
     statusCode: 200,
-    message: 'Suggestions retrieved',
+    message: "Suggestions retrieved",
     data: await suggestChallanValues(query),
-  })
+  });
 }
 
-export async function getDuplicates(req: Request, res: Response): Promise<void> {
-  const query = req.validated?.query as DuplicateQuery
+export async function getDuplicates(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const query = req.validated?.query as DuplicateQuery;
 
   sendResponse(res, {
     statusCode: 200,
-    message: 'Duplicate check complete',
+    message: "Duplicate check complete",
     data: await findDuplicateChallans(query, actorFrom(req)),
-  })
+  });
 }
 
 /**
@@ -113,21 +124,21 @@ export async function getDuplicates(req: Request, res: Response): Promise<void> 
  * policy that reads status codes.
  */
 export async function getPageRange(req: Request, res: Response): Promise<void> {
-  const query = req.validated?.query as PageRangeQuery
+  const query = req.validated?.query as PageRangeQuery;
 
   sendResponse(res, {
     statusCode: 200,
-    message: 'Page range checked',
+    message: "Page range checked",
     data: await checkPageRangeAvailability(query, actorFrom(req)),
-  })
+  });
 }
 
 export async function getOne(req: Request, res: Response): Promise<void> {
   sendResponse(res, {
     statusCode: 200,
-    message: 'Challan retrieved',
+    message: "Challan retrieved",
     data: await getChallan(idFrom(req)),
-  })
+  });
 }
 
 /**
@@ -150,11 +161,14 @@ export async function getOne(req: Request, res: Response): Promise<void> {
  * success/message/errorSources fields — with the payload added alongside.
  */
 export async function postChallan(req: Request, res: Response): Promise<void> {
-  const input = req.validated?.body as SubmitChallanInput
-  const file = req.file
+  const input = req.validated?.body as SubmitChallanInput;
+  const file = req.file;
 
   if (!file) {
-    throw new AppError(400, 'The challan pages are missing from this submission.')
+    throw new AppError(
+      400,
+      "The challan pages are missing from this submission.",
+    );
   }
 
   try {
@@ -162,57 +176,120 @@ export async function postChallan(req: Request, res: Response): Promise<void> {
       input,
       { buffer: file.buffer, mimeType: file.mimetype },
       actorFrom(req),
-    )
+    );
 
-    sendResponse(res, { statusCode: 201, message: 'Challan submitted', data: record })
+    sendResponse(res, {
+      statusCode: 201,
+      message: "Challan submitted",
+      data: record,
+    });
   } catch (error) {
     if (error instanceof ChallanAlreadySubmitted) {
-      const { record } = await getSubmittedChallan(error.challanId)
-      sendResponse(res, { statusCode: 200, message: 'Challan already submitted', data: record })
-      return
+      const { record } = await getSubmittedChallan(error.challanId);
+      sendResponse(res, {
+        statusCode: 200,
+        message: "Challan already submitted",
+        data: record,
+      });
+      return;
     }
 
     if (error instanceof DuplicateChallanError) {
       res.status(error.statusCode).json({
         success: false,
         message: error.message,
-        errorSources: [{ path: 'customerName', message: error.message }],
+        errorSources: [{ path: "customerName", message: error.message }],
         duplicates: error.duplicates,
-      })
-      return
+      });
+      return;
     }
 
     if (error instanceof PageRangeError) {
       res.status(error.statusCode).json({
         success: false,
         message: error.message,
-        errorSources: [{ path: 'sourcePageStart', message: error.message }],
+        errorSources: [{ path: "sourcePageStart", message: error.message }],
         pageRangeProblem: error.problem,
-      })
-      return
+      });
+      return;
     }
 
-    throw error
+    throw error;
   }
 }
 
 export async function patchChallan(req: Request, res: Response): Promise<void> {
-  const input = req.validated?.body as UpdateChallanInput
-  const record = await updateChallan(idFrom(req), input, actorFrom(req))
+  const input = req.validated?.body as UpdateChallanInput;
+  const record = await updateChallan(idFrom(req), input, actorFrom(req));
 
   sendResponse(res, {
     statusCode: 200,
-    message: 'Challan corrected, and its document regenerated',
+    message: "Challan corrected, and its document regenerated",
     data: record,
-  })
+  });
 }
 
-export async function deleteChallan(req: Request, res: Response): Promise<void> {
+export async function deleteChallan(
+  req: Request,
+  res: Response,
+): Promise<void> {
   sendResponse(res, {
     statusCode: 200,
-    message: 'Challan deleted',
+    message: "Challan deleted",
     data: await removeChallan(idFrom(req), actorFrom(req)),
-  })
+  });
+}
+
+/**
+ * Recording that a challan was printed, or that it was not after all.
+ *
+ * The message says what the operator will see on the record rather than
+ * "Updated", because that is the whole value of the call: a stack of filed
+ * challans all look identical until something says which ones have come out
+ * of the printer.
+ */
+export async function patchChallanPrinted(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const input = req.validated?.body as PrintedInput;
+  const record = await setChallanPrinted(
+    idFrom(req),
+    input.printed,
+    actorFrom(req),
+  );
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: input.printed ? "Marked as printed" : "Marked as not printed",
+    data: record,
+  });
+}
+
+/**
+ * Setting a filed challan's district and thana by hand.
+ *
+ * The end of the line for every challan the resolver could not settle, and the
+ * reason leaving one blank is a workable outcome rather than a loss. It takes
+ * a Location Master id and nothing else — no district name, no thana, no
+ * location type — because every one of those is read from the row it points
+ * at, and a client that could send them could file a challan classified
+ * however it liked.
+ *
+ * `null` clears the location and returns the record to Pending.
+ */
+export async function patchChallanLocation(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const { locationId } = req.validated?.body as SetChallanLocationInput;
+  const record = await setChallanLocation(idFrom(req), locationId, actorFrom(req));
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: locationId ? "Location set" : "Location cleared",
+    data: record,
+  });
 }
 
 /**
@@ -229,32 +306,35 @@ export async function deleteChallan(req: Request, res: Response): Promise<void> 
  * failure destroys the response instead of appending an error into the file.
  */
 export async function getDocument(req: Request, res: Response): Promise<void> {
-  const download = await readChallanDocumentStream(idFrom(req))
+  const download = await readChallanDocumentStream(idFrom(req));
 
-  res.setHeader('Content-Type', 'application/pdf')
-  res.setHeader('Content-Disposition', 'inline; filename="' + download.filename + '"')
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader(
+    "Content-Disposition",
+    'inline; filename="' + download.filename + '"',
+  );
   // The record is behind authentication, so no shared cache may keep a copy.
-  res.setHeader('Cache-Control', 'private, no-store')
+  res.setHeader("Cache-Control", "private, no-store");
   if (download.contentLength !== undefined) {
-    res.setHeader('Content-Length', String(download.contentLength))
+    res.setHeader("Content-Length", String(download.contentLength));
   }
 
   try {
-    await pipeline(download.body, res)
+    await pipeline(download.body, res);
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    console.error('[challan] document stream failed: ' + message)
-    res.destroy()
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[challan] document stream failed: " + message);
+    res.destroy();
   }
 }
 
 export async function getBatches(req: Request, res: Response): Promise<void> {
-  const query = req.validated?.query as ListBatchesQuery
-  const { records, total } = await listChallanBatches(query)
+  const query = req.validated?.query as ListBatchesQuery;
+  const { records, total } = await listChallanBatches(query);
 
   sendResponse(res, {
     statusCode: 200,
-    message: 'Batches retrieved',
+    message: "Batches retrieved",
     data: records,
     meta: {
       page: query.page,
@@ -262,15 +342,15 @@ export async function getBatches(req: Request, res: Response): Promise<void> {
       total,
       totalPages: Math.max(1, Math.ceil(total / query.limit)),
     },
-  })
+  });
 }
 
 export async function getBatchOne(req: Request, res: Response): Promise<void> {
   sendResponse(res, {
     statusCode: 200,
-    message: 'Batch retrieved',
+    message: "Batch retrieved",
     data: await getChallanBatch(idFrom(req)),
-  })
+  });
 }
 
 /**
@@ -281,15 +361,25 @@ export async function getBatchOne(req: Request, res: Response): Promise<void> {
  * thing that can be downloaded as one document — so the operator would have to
  * file a junk challan, with a serial and a barcode, for a blank page.
  */
-export async function patchBatchSkippedPages(req: Request, res: Response): Promise<void> {
-  const input = req.validated?.body as SkippedPagesInput
-  const batch = await setBatchSkippedPages(idFrom(req), input.pages, actorFrom(req))
+export async function patchBatchSkippedPages(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const input = req.validated?.body as SkippedPagesInput;
+  const batch = await setBatchSkippedPages(
+    idFrom(req),
+    input.pages,
+    actorFrom(req),
+  );
 
   sendResponse(res, {
     statusCode: 200,
-    message: input.pages.length === 0 ? 'Blank pages cleared' : 'Pages marked as blank',
+    message:
+      input.pages.length === 0
+        ? "Blank pages cleared"
+        : "Pages marked as blank",
     data: batch,
-  })
+  });
 }
 
 /**
@@ -301,13 +391,46 @@ export async function patchBatchSkippedPages(req: Request, res: Response): Promi
  * gives it its own rate limit — and why the service refuses an unfinished
  * batch rather than quietly leaving the missing challans out.
  */
-export async function getBatchDownload(req: Request, res: Response): Promise<void> {
-  const download = await buildBatchPdf(idFrom(req))
+export async function getBatchDownload(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const download = await buildBatchPdf(idFrom(req));
 
-  res.setHeader('Content-Type', 'application/pdf')
-  res.setHeader('Content-Disposition', 'attachment; filename="' + download.filename + '"')
-  res.setHeader('Cache-Control', 'private, no-store')
-  res.setHeader('Content-Length', String(download.pdf.byteLength))
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader(
+    "Content-Disposition",
+    'attachment; filename="' + download.filename + '"',
+  );
+  res.setHeader("Cache-Control", "private, no-store");
+  res.setHeader("Content-Length", String(download.pdf.byteLength));
 
-  res.end(Buffer.from(download.pdf))
+  res.end(Buffer.from(download.pdf));
+}
+
+/**
+ * The same, for every challan in one batch.
+ *
+ * It follows a batch print: the operator sends the assembled PDF to the
+ * printer and says so once, rather than marking fifteen records by hand and
+ * losing count somewhere around nine.
+ */
+export async function patchBatchPrinted(
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const input = req.validated?.body as PrintedInput;
+  const batch = await setBatchPrinted(
+    idFrom(req),
+    input.printed,
+    actorFrom(req),
+  );
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: input.printed
+      ? "Every challan in this batch is marked as printed"
+      : "Print marks cleared for this batch",
+    data: batch,
+  });
 }

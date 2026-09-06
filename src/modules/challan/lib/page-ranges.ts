@@ -1,4 +1,4 @@
-import { MAX_CHALLAN_PAGES, MAX_SOURCE_PAGES } from '../challan.constants'
+import { MAX_CHALLAN_PAGES, MAX_SOURCE_PAGES } from "../challan.constants";
 
 /**
  * Page ranges over one source PDF, as pure arithmetic.
@@ -15,31 +15,31 @@ import { MAX_CHALLAN_PAGES, MAX_SOURCE_PAGES } from '../challan.constants'
  */
 
 export interface PageRange {
-  startPage: number
-  endPage: number
+  startPage: number;
+  endPage: number;
 }
 
 /** A range already claimed by a submitted challan, with something to name it. */
 export interface ClaimedRange extends PageRange {
-  challanNumber: string
+  challanNumber: string;
 }
 
 export type RangeProblem =
-  | { code: 'not-a-page'; message: string }
-  | { code: 'reversed'; message: string }
-  | { code: 'out-of-bounds'; message: string }
-  | { code: 'too-many-pages'; message: string }
-  | { code: 'overlap'; message: string; conflicts: ClaimedRange[] }
+  | { code: "not-a-page"; message: string }
+  | { code: "reversed"; message: string }
+  | { code: "out-of-bounds"; message: string }
+  | { code: "too-many-pages"; message: string }
+  | { code: "overlap"; message: string; conflicts: ClaimedRange[] };
 
 export function pageCountOf(range: PageRange): number {
-  return range.endPage - range.startPage + 1
+  return range.endPage - range.startPage + 1;
 }
 
 /** "page 4" or "pages 4–6", for a sentence a person reads. */
 export function describeRange(range: PageRange): string {
   return range.startPage === range.endPage
     ? `page ${range.startPage}`
-    : `pages ${range.startPage}\u2013${range.endPage}`
+    : `pages ${range.startPage}\u2013${range.endPage}`;
 }
 
 /**
@@ -51,58 +51,76 @@ export function describeRange(range: PageRange): string {
  * as many pages as the range claims, which no client can fake by editing a
  * number in a form.
  */
-export function checkRange(range: PageRange, sourcePageCount: number): RangeProblem | null {
-  const { startPage, endPage } = range
+export function checkRange(
+  range: PageRange,
+  sourcePageCount: number,
+): RangeProblem | null {
+  const { startPage, endPage } = range;
 
   if (!Number.isInteger(startPage) || !Number.isInteger(endPage)) {
-    return { code: 'not-a-page', message: 'A page number has to be a whole number.' }
+    return {
+      code: "not-a-page",
+      message: "A page number has to be a whole number.",
+    };
   }
 
   if (startPage < 1) {
-    return { code: 'not-a-page', message: 'The first page of a challan is page 1 or later.' }
+    return {
+      code: "not-a-page",
+      message: "The first page of a challan is page 1 or later.",
+    };
   }
 
   if (endPage < startPage) {
-    return { code: 'reversed', message: 'The last page comes before the first page.' }
+    return {
+      code: "reversed",
+      message: "The last page comes before the first page.",
+    };
   }
 
   if (!Number.isInteger(sourcePageCount) || sourcePageCount < 1) {
-    return { code: 'out-of-bounds', message: 'The source PDF has no pages to select from.' }
+    return {
+      code: "out-of-bounds",
+      message: "The source PDF has no pages to select from.",
+    };
   }
 
   if (sourcePageCount > MAX_SOURCE_PAGES) {
     return {
-      code: 'out-of-bounds',
+      code: "out-of-bounds",
       message: `That PDF has ${sourcePageCount} pages. This workspace handles up to ${MAX_SOURCE_PAGES}.`,
-    }
+    };
   }
 
   if (endPage > sourcePageCount) {
     return {
-      code: 'out-of-bounds',
+      code: "out-of-bounds",
       message: `The source PDF ends at page ${sourcePageCount}.`,
-    }
+    };
   }
 
   if (pageCountOf(range) > MAX_CHALLAN_PAGES) {
     return {
-      code: 'too-many-pages',
+      code: "too-many-pages",
       message: `That is ${pageCountOf(range)} pages for one challan. The limit is ${MAX_CHALLAN_PAGES}.`,
-    }
+    };
   }
 
-  return null
+  return null;
 }
 
 export function rangesOverlap(a: PageRange, b: PageRange): boolean {
-  return a.startPage <= b.endPage && b.startPage <= a.endPage
+  return a.startPage <= b.endPage && b.startPage <= a.endPage;
 }
 
 /** Every claimed range this one collides with, in page order. */
-export function findOverlaps(range: PageRange, claimed: ClaimedRange[]): ClaimedRange[] {
+export function findOverlaps(
+  range: PageRange,
+  claimed: ClaimedRange[],
+): ClaimedRange[] {
   return claimed
     .filter((other) => rangesOverlap(range, other))
-    .sort((left, right) => left.startPage - right.startPage)
+    .sort((left, right) => left.startPage - right.startPage);
 }
 
 /**
@@ -116,23 +134,23 @@ export function checkRangeAgainst(
   sourcePageCount: number,
   claimed: ClaimedRange[],
 ): RangeProblem | null {
-  const problem = checkRange(range, sourcePageCount)
+  const problem = checkRange(range, sourcePageCount);
   if (problem) {
-    return problem
+    return problem;
   }
 
-  const conflicts = findOverlaps(range, claimed)
+  const conflicts = findOverlaps(range, claimed);
   if (conflicts.length > 0) {
     return {
-      code: 'overlap',
+      code: "overlap",
       message: `${describeRange(range)} already belong${
-        pageCountOf(range) === 1 ? 's' : ''
-      } to ${conflicts.map((conflict) => conflict.challanNumber).join(', ')}.`,
+        pageCountOf(range) === 1 ? "s" : ""
+      } to ${conflicts.map((conflict) => conflict.challanNumber).join(", ")}.`,
       conflicts,
-    }
+    };
   }
 
-  return null
+  return null;
 }
 
 /**
@@ -143,63 +161,77 @@ export function checkRangeAgainst(
  * something" is a fact. It is also what the workspace shows before somebody
  * closes a session with two pages still unfiled.
  */
-export function unassignedRanges(claimed: PageRange[], sourcePageCount: number): PageRange[] {
+export function unassignedRanges(
+  claimed: PageRange[],
+  sourcePageCount: number,
+): PageRange[] {
   if (sourcePageCount < 1) {
-    return []
+    return [];
   }
 
-  const taken = new Set<number>()
+  const taken = new Set<number>();
   for (const range of claimed) {
-    for (let page = Math.max(1, range.startPage); page <= Math.min(sourcePageCount, range.endPage); page += 1) {
-      taken.add(page)
+    for (
+      let page = Math.max(1, range.startPage);
+      page <= Math.min(sourcePageCount, range.endPage);
+      page += 1
+    ) {
+      taken.add(page);
     }
   }
 
-  const gaps: PageRange[] = []
-  let open: PageRange | null = null
+  const gaps: PageRange[] = [];
+  let open: PageRange | null = null;
 
   for (let page = 1; page <= sourcePageCount; page += 1) {
     if (taken.has(page)) {
       if (open) {
-        gaps.push(open)
-        open = null
+        gaps.push(open);
+        open = null;
       }
-      continue
+      continue;
     }
 
     if (open) {
-      open.endPage = page
+      open.endPage = page;
     } else {
-      open = { startPage: page, endPage: page }
+      open = { startPage: page, endPage: page };
     }
   }
 
   if (open) {
-    gaps.push(open)
+    gaps.push(open);
   }
 
-  return gaps
+  return gaps;
 }
 
 /** How many distinct pages of the source are spoken for. */
-export function assignedPageCount(claimed: PageRange[], sourcePageCount: number): number {
-  const taken = new Set<number>()
+export function assignedPageCount(
+  claimed: PageRange[],
+  sourcePageCount: number,
+): number {
+  const taken = new Set<number>();
   for (const range of claimed) {
-    for (let page = Math.max(1, range.startPage); page <= Math.min(sourcePageCount, range.endPage); page += 1) {
-      taken.add(page)
+    for (
+      let page = Math.max(1, range.startPage);
+      page <= Math.min(sourcePageCount, range.endPage);
+      page += 1
+    ) {
+      taken.add(page);
     }
   }
-  return taken.size
+  return taken.size;
 }
 
 export interface BatchProgress {
-  sourcePageCount: number
-  assignedPages: number
-  unassignedPages: number
-  challanCount: number
+  sourcePageCount: number;
+  assignedPages: number;
+  unassignedPages: number;
+  challanCount: number;
   /** 0-100, rounded. The figure the progress bar renders. */
-  percent: number
-  isComplete: boolean
+  percent: number;
+  isComplete: boolean;
 }
 
 /**
@@ -215,8 +247,8 @@ export function batchProgress(
   sourcePageCount: number,
   challanCount: number,
 ): BatchProgress {
-  const assigned = assignedPageCount(claimed, sourcePageCount)
-  const total = Math.max(sourcePageCount, 0)
+  const assigned = assignedPageCount(claimed, sourcePageCount);
+  const total = Math.max(sourcePageCount, 0);
 
   return {
     sourcePageCount: total,
@@ -225,5 +257,5 @@ export function batchProgress(
     challanCount,
     percent: total > 0 ? Math.round((assigned / total) * 100) : 0,
     isComplete: total > 0 && assigned === total,
-  }
+  };
 }

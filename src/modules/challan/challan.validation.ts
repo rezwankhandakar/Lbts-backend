@@ -1,4 +1,4 @@
-import * as z from 'zod'
+import * as z from "zod";
 import {
   CHALLAN_STATUSES,
   MAX_CHALLAN_PAGES,
@@ -6,13 +6,13 @@ import {
   MAX_CHALLAN_PAGE_SIZE,
   MAX_SOURCE_PAGES,
   normalizeMobile,
-} from './challan.constants'
+} from "./challan.constants";
 
 /** Mongo ObjectId as it arrives in a URL. */
-const objectId = z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid id.')
+const objectId = z.string().regex(/^[0-9a-fA-F]{24}$/, "Invalid id.");
 
-export const challanIdParamSchema = z.object({ id: objectId })
-export const batchIdParamSchema = z.object({ id: objectId })
+export const challanIdParamSchema = z.object({ id: objectId });
+export const batchIdParamSchema = z.object({ id: objectId });
 
 /**
  * A submission arrives as multipart, because it carries the extracted challan
@@ -24,8 +24,13 @@ function text(min: number, max: number, label: string) {
   return z
     .string()
     .trim()
-    .min(min, min === 1 ? `${label} is required` : `${label} must be at least ${min} characters`)
-    .max(max, `${label} must be ${max} characters or fewer`)
+    .min(
+      min,
+      min === 1
+        ? `${label} is required`
+        : `${label} must be at least ${min} characters`,
+    )
+    .max(max, `${label} must be ${max} characters or fewer`);
 }
 
 function optionalText(max: number, label: string) {
@@ -33,7 +38,7 @@ function optionalText(max: number, label: string) {
     .string()
     .trim()
     .max(max, `${label} must be ${max} characters or fewer`)
-    .default('')
+    .default("");
 }
 
 /**
@@ -53,7 +58,7 @@ function mobile(label: string) {
     .refine(
       (value) => /^01\d{9}$/.test(value) || /^[\d+\-() ]{6,20}$/.test(value),
       `Enter a valid ${label.toLowerCase()}, for example 01712345678.`,
-    )
+    );
 }
 
 /**
@@ -65,37 +70,42 @@ function mobile(label: string) {
  * row schema below ever sees them. A PATCH sends real JSON and its array
  * arrives as an array, which is why both are accepted.
  */
-const jsonArray = z.union([z.array(z.unknown()), z.string()]).transform((value, ctx) => {
-  if (Array.isArray(value)) {
-    return value
-  }
-
-  try {
-    const parsed: unknown = JSON.parse(value)
-    if (Array.isArray(parsed)) {
-      return parsed
+const jsonArray = z
+  .union([z.array(z.unknown()), z.string()])
+  .transform((value, ctx) => {
+    if (Array.isArray(value)) {
+      return value;
     }
-  } catch {
-    // Falls through to the issue below: an unreadable field is a bad request,
-    // not something to guess at.
-  }
 
-  ctx.addIssue({ code: 'custom', message: 'The product rows could not be read.' })
-  return z.NEVER
-})
+    try {
+      const parsed: unknown = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      // Falls through to the issue below: an unreadable field is a bad request,
+      // not something to guess at.
+    }
+
+    ctx.addIssue({
+      code: "custom",
+      message: "The product rows could not be read.",
+    });
+    return z.NEVER;
+  });
 
 /** One product row: what it is, which model, and how many. */
 const challanItemSchema = z.object({
-  productName: text(2, 200, 'Product'),
-  model: text(1, 120, 'Model'),
+  productName: text(2, 200, "Product"),
+  model: text(1, 120, "Model"),
   qty: z.coerce
-    .number({ error: 'Quantity is required' })
-    .int('Quantity must be a whole number')
-    .min(1, 'Quantity must be at least 1')
-    .max(100000, 'Quantity looks too large. Check the challan.'),
-})
+    .number({ error: "Quantity is required" })
+    .int("Quantity must be a whole number")
+    .min(1, "Quantity must be at least 1")
+    .max(100000, "Quantity looks too large. Check the challan."),
+});
 
-export type ChallanItemInput = z.infer<typeof challanItemSchema>
+export type ChallanItemInput = z.infer<typeof challanItemSchema>;
 
 /**
  * The values transcribed off the challan, plus the two optional ones.
@@ -110,19 +120,50 @@ export type ChallanItemInput = z.infer<typeof challanItemSchema>
  * request body cannot set.
  */
 const challanFields = {
-  customerName: text(2, 200, 'Customer name'),
-  deliveryAddress: text(3, 500, 'Delivery address'),
-  thana: text(1, 120, 'Thana'),
-  district: text(1, 120, 'District'),
-  receiverMobile: mobile('Receiver mobile'),
+  customerName: text(2, 200, "Customer name"),
+  deliveryAddress: text(3, 500, "Delivery address"),
+  /**
+   * The thana and district as they were transcribed — **optional**.
+   *
+   * A Walton challan does not always print them. Some carry only a delivery
+   * address, some a thana and no district, some a spelling no list contains.
+   * Requiring them would make an operator invent one to get past the form, and
+   * an invented district is a worse record than a blank one: it is wrong, and
+   * nothing downstream can tell.
+   *
+   * What is entered here is stored exactly as typed and never rewritten. The
+   * server separately resolves it against the Location Master, and stores the
+   * result beside it rather than on top of it.
+   */
+  thana: optionalText(120, "Thana"),
+  district: optionalText(120, "District"),
+  /**
+   * The Location Master row an operator picked from the cascading selector, if
+   * they picked one.
+   *
+   * Optional, and it is an override rather than an input to resolution: sent,
+   * the server validates it against the collection and records the location as
+   * chosen by a person, which nothing later re-resolves over. Absent, the
+   * server resolves the text itself.
+   *
+   * Note what is *not* here — no district name, no thana name, no location
+   * type, no confidence and no resolution source. A client that could send
+   * those could file a challan classified however it liked; an id is a
+   * reference into a collection the server owns, and every value is read from
+   * the row it points at.
+   */
+  locationId: z
+    .union([z.string().trim().regex(/^[0-9a-fA-F]{24}$/, "Invalid location."), z.literal("")])
+    .default(""),
+  receiverMobile: mobile("Receiver mobile"),
   /** Optional: many challans carry only the receiver's number. */
-  senderMobile: optionalText(40, 'Sender mobile'),
+  senderMobile: optionalText(40, "Sender mobile"),
   /**
    * One free-text field rather than Gate Pass's discriminated zone/PO pair,
    * because a Walton challan prints it as a single "Zone/PO" cell. Splitting a
    * value nobody separated on paper would mean guessing which half is which.
    */
-  zonePo: optionalText(120, 'Zone / PO'),
+  zonePo: optionalText(120, "Zone / PO"),
   /**
    * One row per product on the challan. A Walton challan routinely lists
    * several, so this is an array even when there is only one — the shape does
@@ -133,21 +174,26 @@ const challanFields = {
    * alternative — `items[0][model]`-style keys — would put a parser nobody
    * asked for between the form and the schema.
    */
-  items: jsonArray
-    .pipe(
-      z
-        .array(challanItemSchema)
-        .min(1, 'Add at least one product')
-        .max(MAX_CHALLAN_ITEMS, `A challan can carry at most ${MAX_CHALLAN_ITEMS} products`),
-    ),
-}
+  items: jsonArray.pipe(
+    z
+      .array(challanItemSchema)
+      .min(1, "Add at least one product")
+      .max(
+        MAX_CHALLAN_ITEMS,
+        `A challan can carry at most ${MAX_CHALLAN_ITEMS} products`,
+      ),
+  ),
+};
 
 const pageNumber = (label: string) =>
   z.coerce
     .number({ error: `${label} is required` })
     .int(`${label} must be a whole number`)
     .min(1, `${label} starts at 1`)
-    .max(MAX_SOURCE_PAGES, `${label} is beyond the largest source PDF this workspace handles`)
+    .max(
+      MAX_SOURCE_PAGES,
+      `${label} is beyond the largest source PDF this workspace handles`,
+    );
 
 /**
  * Where in the source PDF this challan came from.
@@ -168,53 +214,60 @@ const sourceFields = {
   sessionKey: z
     .string()
     .trim()
-    .min(8, 'Invalid workspace session.')
-    .max(64, 'Invalid workspace session.')
-    .regex(/^[A-Za-z0-9_-]+$/, 'Invalid workspace session.'),
-  sourceFileName: text(1, 260, 'Source file name'),
+    .min(8, "Invalid workspace session.")
+    .max(64, "Invalid workspace session.")
+    .regex(/^[A-Za-z0-9_-]+$/, "Invalid workspace session."),
+  sourceFileName: text(1, 260, "Source file name"),
   sourcePageCount: z.coerce
-    .number({ error: 'The source page count is required' })
+    .number({ error: "The source page count is required" })
     .int()
-    .min(1, 'The source PDF has no pages.')
-    .max(MAX_SOURCE_PAGES, `This workspace handles source PDFs up to ${MAX_SOURCE_PAGES} pages.`),
-  sourcePageStart: pageNumber('The first page'),
-  sourcePageEnd: pageNumber('The last page'),
-}
+    .min(1, "The source PDF has no pages.")
+    .max(
+      MAX_SOURCE_PAGES,
+      `This workspace handles source PDFs up to ${MAX_SOURCE_PAGES} pages.`,
+    ),
+  sourcePageStart: pageNumber("The first page"),
+  sourcePageEnd: pageNumber("The last page"),
+};
 
 /** Multipart sends `true`/`false` as text; anything else is not a yes. */
 const flag = z
   .union([z.boolean(), z.string()])
   .default(false)
-  .transform((value) => value === true || value === 'true' || value === '1')
+  .transform((value) => value === true || value === "true" || value === "1");
 
 function checkPageRange(
-  value: { sourcePageStart: number; sourcePageEnd: number; sourcePageCount: number },
+  value: {
+    sourcePageStart: number;
+    sourcePageEnd: number;
+    sourcePageCount: number;
+  },
   ctx: z.RefinementCtx,
 ): void {
   if (value.sourcePageEnd < value.sourcePageStart) {
     ctx.addIssue({
-      code: 'custom',
-      path: ['sourcePageEnd'],
-      message: 'The last page comes before the first page.',
-    })
-    return
+      code: "custom",
+      path: ["sourcePageEnd"],
+      message: "The last page comes before the first page.",
+    });
+    return;
   }
 
   if (value.sourcePageEnd > value.sourcePageCount) {
     ctx.addIssue({
-      code: 'custom',
-      path: ['sourcePageEnd'],
+      code: "custom",
+      path: ["sourcePageEnd"],
       message: `The source PDF ends at page ${value.sourcePageCount}.`,
-    })
+    });
   }
 
-  const pages = value.sourcePageEnd - value.sourcePageStart + 1
+  const pages = value.sourcePageEnd - value.sourcePageStart + 1;
   if (pages > MAX_CHALLAN_PAGES) {
     ctx.addIssue({
-      code: 'custom',
-      path: ['sourcePageEnd'],
+      code: "custom",
+      path: ["sourcePageEnd"],
       message: `That is ${pages} pages for one challan. The limit is ${MAX_CHALLAN_PAGES}.`,
-    })
+    });
   }
 }
 
@@ -238,15 +291,15 @@ export const submitChallanSchema = z
     submissionKey: z
       .string()
       .trim()
-      .min(8, 'Invalid submission key.')
-      .max(64, 'Invalid submission key.')
-      .regex(/^[A-Za-z0-9_-]+$/, 'Invalid submission key.'),
+      .min(8, "Invalid submission key.")
+      .max(64, "Invalid submission key.")
+      .regex(/^[A-Za-z0-9_-]+$/, "Invalid submission key."),
     /** The operator answering the possible-duplicate question. */
     acknowledgeDuplicate: flag,
   })
-  .superRefine(checkPageRange)
+  .superRefine(checkPageRange);
 
-export type SubmitChallanInput = z.infer<typeof submitChallanSchema>
+export type SubmitChallanInput = z.infer<typeof submitChallanSchema>;
 
 /**
  * Correcting a filed challan.
@@ -255,42 +308,57 @@ export type SubmitChallanInput = z.infer<typeof submitChallanSchema>
  * about a file that no longer exists, so it is not editable — and the pages
  * themselves are already stored, so a correction never needs them resent.
  */
-export const updateChallanSchema = z.object(challanFields)
+export const updateChallanSchema = z.object(challanFields);
 
-export type UpdateChallanInput = z.infer<typeof updateChallanSchema>
+export type UpdateChallanInput = z.infer<typeof updateChallanSchema>;
 
 /**
  * What narrows the challan list. Shared by the paged list and any read that
  * has to describe the same set, so the two cannot drift.
  */
 const challanFilterFields = {
-  search: z.string().trim().max(160).default(''),
-  status: z.enum(['all', ...CHALLAN_STATUSES]).default('all'),
-  district: z.string().trim().max(120).default(''),
-  customer: z.string().trim().max(200).default(''),
-  product: z.string().trim().max(200).default(''),
-  model: z.string().trim().max(120).default(''),
-  zonePo: z.string().trim().max(120).default(''),
-  batchId: z.union([objectId, z.literal('')]).default(''),
-  createdBy: z.union([objectId, z.literal('')]).default(''),
+  search: z.string().trim().max(160).default(""),
+  status: z.enum(["all", ...CHALLAN_STATUSES]).default("all"),
+  district: z.string().trim().max(120).default(""),
+  /**
+   * Whether the location has been settled.
+   *
+   * `pending` is the working list: the challans an administrator has to look
+   * at. It filters on the stored `locationStatus` rather than on the presence
+   * of a sub-document, so it is an indexed lookup rather than a scan.
+   */
+  location: z.enum(["all", "verified", "pending"]).default("all"),
+  customer: z.string().trim().max(200).default(""),
+  product: z.string().trim().max(200).default(""),
+  model: z.string().trim().max(120).default(""),
+  zonePo: z.string().trim().max(120).default(""),
+  batchId: z.union([objectId, z.literal("")]).default(""),
+  createdBy: z.union([objectId, z.literal("")]).default(""),
   from: z
     .string()
     .trim()
-    .regex(/^\d{4}-\d{2}-\d{2}/, 'Invalid start date.')
-    .or(z.literal(''))
-    .default(''),
+    .regex(/^\d{4}-\d{2}-\d{2}/, "Invalid start date.")
+    .or(z.literal(""))
+    .default(""),
   to: z
     .string()
     .trim()
-    .regex(/^\d{4}-\d{2}-\d{2}/, 'Invalid end date.')
-    .or(z.literal(''))
-    .default(''),
-}
+    .regex(/^\d{4}-\d{2}-\d{2}/, "Invalid end date.")
+    .or(z.literal(""))
+    .default(""),
+};
 
 /** ISO dates compare correctly as strings, so this is one check, not two Dates. */
-function checkDateOrder(value: { from: string; to: string }, ctx: z.RefinementCtx): void {
+function checkDateOrder(
+  value: { from: string; to: string },
+  ctx: z.RefinementCtx,
+): void {
   if (value.from && value.to && value.from > value.to) {
-    ctx.addIssue({ code: 'custom', path: ['to'], message: 'The end date is before the start date.' })
+    ctx.addIssue({
+      code: "custom",
+      path: ["to"],
+      message: "The end date is before the start date.",
+    });
   }
 }
 
@@ -302,21 +370,26 @@ function checkDateOrder(value: { from: string; to: string }, ctx: z.RefinementCt
 export const listChallansQuerySchema = z
   .object({
     page: z.coerce.number().int().min(1).default(1),
-    limit: z.coerce.number().int().min(1).max(MAX_CHALLAN_PAGE_SIZE).default(10),
+    limit: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_CHALLAN_PAGE_SIZE)
+      .default(10),
     ...challanFilterFields,
   })
-  .superRefine(checkDateOrder)
+  .superRefine(checkDateOrder);
 
-export type ListChallansQuery = z.infer<typeof listChallansQuerySchema>
+export type ListChallansQuery = z.infer<typeof listChallansQuerySchema>;
 
 export const listBatchesQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
   limit: z.coerce.number().int().min(1).max(MAX_CHALLAN_PAGE_SIZE).default(10),
-  status: z.enum(['all', 'Processing', 'Completed']).default('all'),
-  search: z.string().trim().max(260).default(''),
-})
+  status: z.enum(["all", "Processing", "Completed"]).default("all"),
+  search: z.string().trim().max(260).default(""),
+});
 
-export type ListBatchesQuery = z.infer<typeof listBatchesQuerySchema>
+export type ListBatchesQuery = z.infer<typeof listBatchesQuerySchema>;
 
 /**
  * The duplicate probe the workspace runs before it submits. It takes candidate
@@ -324,14 +397,14 @@ export type ListBatchesQuery = z.infer<typeof listBatchesQuerySchema>
  * saved to point at.
  */
 export const duplicateQuerySchema = z.object({
-  sessionKey: z.string().trim().max(64).default(''),
-  customerName: z.string().trim().max(200).default(''),
-  receiverMobile: z.string().trim().max(40).default(''),
-  model: z.string().trim().max(120).default(''),
-  excludeId: z.union([objectId, z.literal('')]).default(''),
-})
+  sessionKey: z.string().trim().max(64).default(""),
+  customerName: z.string().trim().max(200).default(""),
+  receiverMobile: z.string().trim().max(40).default(""),
+  model: z.string().trim().max(120).default(""),
+  excludeId: z.union([objectId, z.literal("")]).default(""),
+});
 
-export type DuplicateQuery = z.infer<typeof duplicateQuerySchema>
+export type DuplicateQuery = z.infer<typeof duplicateQuerySchema>;
 
 /**
  * Fields the entry form can offer type-ahead for.
@@ -341,22 +414,22 @@ export type DuplicateQuery = z.infer<typeof duplicateQuerySchema>
  * column it liked.
  */
 export const CHALLAN_SUGGESTION_FIELDS = [
-  'customerName',
-  'thana',
-  'district',
-  'product',
-  'model',
-  'zonePo',
-] as const
-export type ChallanSuggestionField = (typeof CHALLAN_SUGGESTION_FIELDS)[number]
+  "customerName",
+  "thana",
+  "district",
+  "product",
+  "model",
+  "zonePo",
+] as const;
+export type ChallanSuggestionField = (typeof CHALLAN_SUGGESTION_FIELDS)[number];
 
 export const suggestionQuerySchema = z.object({
   field: z.enum(CHALLAN_SUGGESTION_FIELDS),
   /** Two characters minimum — a one-letter prefix matches most of a column. */
-  q: z.string().trim().min(2, 'Type at least two characters').max(160),
-})
+  q: z.string().trim().min(2, "Type at least two characters").max(160),
+});
 
-export type ChallanSuggestionQuery = z.infer<typeof suggestionQuerySchema>
+export type ChallanSuggestionQuery = z.infer<typeof suggestionQuerySchema>;
 
 /**
  * Which pages of a source PDF are not challans.
@@ -369,10 +442,23 @@ export type ChallanSuggestionQuery = z.infer<typeof suggestionQuerySchema>
 export const skippedPagesSchema = z.object({
   pages: z
     .array(z.coerce.number().int().min(1).max(MAX_SOURCE_PAGES))
-    .max(MAX_SOURCE_PAGES, 'That is more pages than a source PDF can have.'),
-})
+    .max(MAX_SOURCE_PAGES, "That is more pages than a source PDF can have."),
+});
 
-export type SkippedPagesInput = z.infer<typeof skippedPagesSchema>
+export type SkippedPagesInput = z.infer<typeof skippedPagesSchema>;
+
+/**
+ * Marking a challan — or a whole batch — as printed, or taking that back.
+ *
+ * A boolean rather than two verbs, because undo has to be the same shape as
+ * the thing it undoes. The mark is a claim about what came out of a printer,
+ * and a claim that could only ever be set would be one nobody could correct.
+ */
+export const printedSchema = z.object({
+  printed: z.boolean(),
+});
+
+export type PrintedInput = z.infer<typeof printedSchema>;
 
 /**
  * Asking the server to check a page range before anything is submitted.
@@ -388,6 +474,6 @@ export const pageRangeQuerySchema = z
     sourcePageStart: sourceFields.sourcePageStart,
     sourcePageEnd: sourceFields.sourcePageEnd,
   })
-  .superRefine(checkPageRange)
+  .superRefine(checkPageRange);
 
-export type PageRangeQuery = z.infer<typeof pageRangeQuerySchema>
+export type PageRangeQuery = z.infer<typeof pageRangeQuerySchema>;

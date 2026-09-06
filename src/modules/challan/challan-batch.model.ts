@@ -1,6 +1,6 @@
-import { Schema, model } from 'mongoose'
-import type { InferSchemaType } from 'mongoose'
-import { CHALLAN_BATCH_STATUSES, MAX_SOURCE_PAGES } from './challan.constants'
+import { Schema, model } from "mongoose";
+import type { InferSchemaType } from "mongoose";
+import { CHALLAN_BATCH_STATUSES, MAX_SOURCE_PAGES } from "./challan.constants";
 
 /**
  * One WhatsApp PDF, and the challans cut out of it.
@@ -31,7 +31,12 @@ const challanBatchSchema = new Schema(
      */
     sessionKey: { type: String, required: true, maxlength: 64 },
 
-    sourceFileName: { type: String, required: true, trim: true, maxlength: 260 },
+    sourceFileName: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 260,
+    },
     /**
      * As reported by the browser that read the file. This API never sees the
      * source PDF, so this is a declaration rather than a measurement — what is
@@ -39,7 +44,12 @@ const challanBatchSchema = new Schema(
      * extract must carry exactly as many pages as its range claims, and no two
      * challans in a batch may claim the same page.
      */
-    sourcePageCount: { type: Number, required: true, min: 1, max: MAX_SOURCE_PAGES },
+    sourcePageCount: {
+      type: Number,
+      required: true,
+      min: 1,
+      max: MAX_SOURCE_PAGES,
+    },
     /** Bytes of the source file, for the record. Never used as a key. */
     sourceFileSize: { type: Number, default: null, min: 0 },
 
@@ -69,6 +79,16 @@ const challanBatchSchema = new Schema(
     challanCount: { type: Number, required: true, default: 0, min: 0 },
     /** Pages belonging to a filed challan, or marked as not being one. */
     assignedPageCount: { type: Number, required: true, default: 0, min: 0 },
+    /**
+     * How many of this batch's challans have been sent to a printer.
+     *
+     * Denormalised for the same reason the two counts above it are: the batch
+     * list renders "3 of 3 printed" per row, and an aggregation per row is
+     * exactly what an M0 cluster cannot afford. Recomputed from the challans
+     * by `refreshBatchProgress` rather than incremented, so it cannot drift
+     * away from the records it is a count of.
+     */
+    printedChallanCount: { type: Number, required: true, default: 0, min: 0 },
 
     /**
      * Two states, and neither is a button. A batch is Completed exactly when
@@ -77,28 +97,38 @@ const challanBatchSchema = new Schema(
      * decision. A batch with pages nobody has looked at cannot be marked
      * finished by anybody, however much they would like to.
      */
-    status: { type: String, enum: CHALLAN_BATCH_STATUSES, default: 'Processing', index: true },
+    status: {
+      type: String,
+      enum: CHALLAN_BATCH_STATUSES,
+      default: "Processing",
+      index: true,
+    },
     completedAt: { type: Date, default: null },
 
-    createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+    createdBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
+      index: true,
+    },
   },
   {
     timestamps: true,
     versionKey: false,
   },
-)
+);
 
 /**
  * What makes "join the batch my first challan created" safe under concurrency:
  * two simultaneous first submissions both upsert on this key, and exactly one
  * of them wins.
  */
-challanBatchSchema.index({ createdBy: 1, sessionKey: 1 }, { unique: true })
-challanBatchSchema.index({ createdAt: -1 })
-challanBatchSchema.index({ status: 1, createdAt: -1 })
+challanBatchSchema.index({ createdBy: 1, sessionKey: 1 }, { unique: true });
+challanBatchSchema.index({ createdAt: -1 });
+challanBatchSchema.index({ status: 1, createdAt: -1 });
 
-export type ChallanBatch = InferSchemaType<typeof challanBatchSchema>
+export type ChallanBatch = InferSchemaType<typeof challanBatchSchema>;
 
-export const ChallanBatchModel = model('ChallanBatch', challanBatchSchema)
+export const ChallanBatchModel = model("ChallanBatch", challanBatchSchema);
 
-export type ChallanBatchDocument = InstanceType<typeof ChallanBatchModel>
+export type ChallanBatchDocument = InstanceType<typeof ChallanBatchModel>;

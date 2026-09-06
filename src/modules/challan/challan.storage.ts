@@ -1,7 +1,12 @@
-import { randomUUID } from 'node:crypto'
-import { deleteObject, getObjectStream, putObject, requireStorage } from '../../config/r2'
-import { AppError } from '../../utils/app-error'
-import { MAX_CHALLAN_UPLOAD_BYTES } from './challan.constants'
+import { randomUUID } from "node:crypto";
+import {
+  deleteObject,
+  getObjectStream,
+  putObject,
+  requireStorage,
+} from "../../config/r2";
+import { AppError } from "../../utils/app-error";
+import { MAX_CHALLAN_UPLOAD_BYTES } from "./challan.constants";
 
 /**
  * Cloudflare R2, for challan documents.
@@ -24,13 +29,13 @@ import { MAX_CHALLAN_UPLOAD_BYTES } from './challan.constants'
  * ever stale. `private` rather than `public`: the object is served through the
  * authenticated API and no shared cache may hold a copy of it.
  */
-const DOCUMENT_CACHE_CONTROL = 'private, max-age=31536000, immutable'
+const DOCUMENT_CACHE_CONTROL = "private, max-age=31536000, immutable";
 
 export interface StoredChallanDocument {
-  key: string
-  size: number
-  pageCount: number
-  generatedAt: Date
+  key: string;
+  size: number;
+  pageCount: number;
+  generatedAt: Date;
 }
 
 /**
@@ -42,16 +47,31 @@ export interface StoredChallanDocument {
  * an object key is a path-traversal and overwrite problem waiting to happen,
  * and a predictable key would make one challan guessable from another.
  */
-export function buildChallanKey(prefix: string, challanNumber: string, when: Date): string {
-  const year = when.getUTCFullYear()
-  const month = String(when.getUTCMonth() + 1).padStart(2, '0')
+export function buildChallanKey(
+  prefix: string,
+  challanNumber: string,
+  when: Date,
+): string {
+  const year = when.getUTCFullYear();
+  const month = String(when.getUTCMonth() + 1).padStart(2, "0");
 
-  return prefix + '/' + year + '/' + month + '/' + challanNumber + '/' + randomUUID() + '.pdf'
+  return (
+    prefix +
+    "/" +
+    year +
+    "/" +
+    month +
+    "/" +
+    challanNumber +
+    "/" +
+    randomUUID() +
+    ".pdf"
+  );
 }
 
 /** The signature check. Multer trusts a Content-Type; this trusts the bytes. */
 export function isPdfBuffer(buffer: Uint8Array): boolean {
-  return Buffer.from(buffer.subarray(0, 5)).toString('latin1') === '%PDF-'
+  return Buffer.from(buffer.subarray(0, 5)).toString("latin1") === "%PDF-";
 }
 
 /**
@@ -63,27 +83,30 @@ export function isPdfBuffer(buffer: Uint8Array): boolean {
  * whole file was sent, and refusing it there protects a 512 MB instance from
  * being asked to build a merged document on top of it.
  */
-export function assertUploadableExtract(buffer: Uint8Array, mimeType: string): void {
-  if (mimeType !== 'application/pdf') {
-    throw new AppError(400, 'The challan pages have to be sent as a PDF.')
+export function assertUploadableExtract(
+  buffer: Uint8Array,
+  mimeType: string,
+): void {
+  if (mimeType !== "application/pdf") {
+    throw new AppError(400, "The challan pages have to be sent as a PDF.");
   }
 
   if (buffer.length === 0) {
-    throw new AppError(400, 'The challan pages are empty.')
+    throw new AppError(400, "The challan pages are empty.");
   }
 
   if (buffer.length > MAX_CHALLAN_UPLOAD_BYTES) {
-    const megabytes = Math.round(MAX_CHALLAN_UPLOAD_BYTES / (1024 * 1024))
+    const megabytes = Math.round(MAX_CHALLAN_UPLOAD_BYTES / (1024 * 1024));
     throw new AppError(
       413,
-      'Those challan pages are larger than ' +
+      "Those challan pages are larger than " +
         megabytes +
-        ' MB. Select a narrower page range, or use a smaller source PDF.',
-    )
+        " MB. Select a narrower page range, or use a smaller source PDF.",
+    );
   }
 
   if (!isPdfBuffer(buffer)) {
-    throw new AppError(400, 'The challan pages are not a readable PDF.')
+    throw new AppError(400, "The challan pages are not a readable PDF.");
   }
 }
 
@@ -101,18 +124,18 @@ export async function uploadChallanDocument(
   pdf: Uint8Array,
   pageCount: number,
 ): Promise<StoredChallanDocument> {
-  const { challanKeyPrefix } = requireStorage()
-  const generatedAt = new Date()
-  const key = buildChallanKey(challanKeyPrefix, challanNumber, generatedAt)
+  const { challanKeyPrefix } = requireStorage();
+  const generatedAt = new Date();
+  const key = buildChallanKey(challanKeyPrefix, challanNumber, generatedAt);
 
   await putObject({
     key,
     body: Buffer.from(pdf),
-    contentType: 'application/pdf',
+    contentType: "application/pdf",
     cacheControl: DOCUMENT_CACHE_CONTROL,
-  })
+  });
 
-  return { key, size: pdf.length, pageCount, generatedAt }
+  return { key, size: pdf.length, pageCount, generatedAt };
 }
 
 /**
@@ -127,21 +150,23 @@ export async function uploadChallanDocument(
  * place in the module that pulls whole PDFs onto a small instance's heap.
  */
 export async function readChallanDocument(key: string): Promise<Uint8Array> {
-  const object = await getObjectStream(key)
-  const chunks: Buffer[] = []
+  const object = await getObjectStream(key);
+  const chunks: Buffer[] = [];
 
   for await (const chunk of object.body) {
     // A Node readable in non-object mode yields Buffers, but its type is the
     // wider `any` the stream types declare — narrowed here rather than cast.
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'binary'))
+    chunks.push(
+      Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), "binary"),
+    );
   }
 
-  return new Uint8Array(Buffer.concat(chunks))
+  return new Uint8Array(Buffer.concat(chunks));
 }
 
 /** The stream itself, for the endpoint that hands the document to a browser. */
 export async function openChallanDocument(key: string) {
-  return getObjectStream(key)
+  return getObjectStream(key);
 }
 
 /**
@@ -150,9 +175,11 @@ export async function openChallanDocument(key: string) {
  * MongoDB, so a failure here leaves an orphan in the bucket rather than a
  * challan pointing at a document that no longer exists.
  */
-export async function discardChallanDocument(key: string | null | undefined): Promise<void> {
+export async function discardChallanDocument(
+  key: string | null | undefined,
+): Promise<void> {
   if (!key) {
-    return
+    return;
   }
-  await deleteObject(key)
+  await deleteObject(key);
 }

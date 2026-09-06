@@ -69,6 +69,31 @@ const envSchema = z.object({
    * what lands here is only what an individual submitted challan became.
    */
   R2_CHALLAN_PREFIX: z.preprocess(blank, z.string().trim().min(1).default('challans')),
+
+  /**
+   * Gemini, which helps choose between location candidates this server has
+   * already narrowed down. Optional in exactly the way R2 is: unconfigured,
+   * the API boots and everything works, and location resolution simply stops
+   * one step earlier — at the local matcher — leaving anything it could not
+   * settle for a person.
+   *
+   * The key is server-side only and must never appear in a VITE_ variable.
+   * The browser asks this API to resolve a location; this API asks Gemini.
+   */
+  GEMINI_API_KEY: z.preprocess(blank, z.string().trim().min(1).optional()),
+  GEMINI_MODEL: z.preprocess(blank, z.string().trim().min(1).default('gemini-2.5-flash')),
+  /**
+   * How sure Gemini has to be before its choice is written to a challan.
+   * Clamped to a floor in the resolver, because the business rule is that a
+   * blank location beats a wrong one and a threshold near zero would invert it.
+   */
+  GEMINI_CONFIDENCE: z.preprocess(blank, z.coerce.number().min(0).max(1).default(0.85)),
+  /**
+   * Short on purpose. This runs while an operator is waiting to submit a
+   * challan, and the correct answer to a slow model is to leave the location
+   * blank and carry on — not to hold up the filing.
+   */
+  GEMINI_TIMEOUT_MS: z.preprocess(blank, z.coerce.number().int().min(1000).max(30000).default(8000)),
 })
 
 const parsed = envSchema.safeParse(process.env)
@@ -118,6 +143,26 @@ if (!r2) {
   )
 }
 
+/**
+ * Gemini is assistive and entirely optional, so an absent key is a
+ * configuration state rather than an error. Everything downstream reads
+ * `config.gemini === null` and takes the local-only path.
+ */
+const gemini = parsed.data.GEMINI_API_KEY
+  ? {
+      apiKey: parsed.data.GEMINI_API_KEY,
+      model: parsed.data.GEMINI_MODEL,
+      minConfidence: parsed.data.GEMINI_CONFIDENCE,
+      timeoutMs: parsed.data.GEMINI_TIMEOUT_MS,
+    }
+  : null
+
+if (!gemini) {
+  console.warn(
+    '[config] Gemini is not configured — location resolution will use the master collection only, and anything it cannot settle is left for an administrator.',
+  )
+}
+
 export const config = {
   port: parsed.data.PORT,
   nodeEnv: parsed.data.NODE_ENV,
@@ -143,4 +188,10 @@ export const config = {
   },
   /** null when the deployment carries no Cloudflare R2 credentials. */
   r2,
+  /**
+   * null when no Gemini key is configured. The location resolver checks this
+   * and skips its assisted step entirely — it never becomes a failed request
+   * that has to be caught, and nothing in the Challan module notices.
+   */
+  gemini,
 } as const

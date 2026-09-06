@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { administrationRoutes } from '../modules/administration/administration.route'
 import { challanBatchRoutes, challanRoutes } from '../modules/challan/challan.route'
 import { gatePassRoutes } from '../modules/gate-pass/gate-pass.route'
+import { locationRoutes } from '../modules/location/location.route'
 import { profileRoutes } from '../modules/profile/profile.route'
 import { userRoutes } from '../modules/user/user.route'
 import { healthRoutes } from './health.route'
@@ -29,6 +30,13 @@ const routes: RouteDefinition[] = [
    * the file rather than about a record.
    */
   { path: '/challan-batches', route: challanBatchRoutes },
+  /**
+   * The location master: reference data rather than a records module, which is
+   * why it is mounted at the top level and not underneath the module that
+   * happens to use it first. Challan is that module; anything else that has to
+   * classify a delivery reads this same collection rather than growing a copy.
+   */
+  { path: '/locations', route: locationRoutes },
 ]
 
 const router = Router()

@@ -3,7 +3,7 @@ import {
   hasBengaliUnicode,
   looksLikeBijoy,
   shouldConvertAsBijoy,
-} from 'bijoy2unicode'
+} from "bijoy2unicode";
 
 /**
  * Legacy Bangla (Bijoy / SutonnyMJ ANSI) to Unicode.
@@ -34,11 +34,11 @@ import {
  */
 
 /** How a value reached its final form, so the UI can say what it did. */
-export type BanglaConversion = 'unchanged' | 'converted'
+export type BanglaConversion = "unchanged" | "converted";
 
 export interface BanglaNormalization {
-  value: string
-  conversion: BanglaConversion
+  value: string;
+  conversion: BanglaConversion;
 }
 
 /**
@@ -50,11 +50,11 @@ export interface BanglaNormalization {
  * what makes the test safe to act on without asking.
  */
 export function isLikelyLegacyBangla(value: string): boolean {
-  return looksLikeBijoy(value)
+  return looksLikeBijoy(value);
 }
 
 export function containsUnicodeBangla(value: string): boolean {
-  return hasBengaliUnicode(value)
+  return hasBengaliUnicode(value);
 }
 
 /**
@@ -74,20 +74,20 @@ export function containsUnicodeBangla(value: string): boolean {
  */
 export function normalizeBanglaText(value: string): BanglaNormalization {
   if (!value || !shouldConvertAsBijoy(value)) {
-    return { value, conversion: 'unchanged' }
+    return { value, conversion: "unchanged" };
   }
 
-  const converted = convertBijoyToUnicode(value)
+  const converted = convertBijoyToUnicode(value);
 
   // A converter that returned the input unchanged did nothing worth reporting.
   return converted === value
-    ? { value, conversion: 'unchanged' }
-    : { value: converted, conversion: 'converted' }
+    ? { value, conversion: "unchanged" }
+    : { value: converted, conversion: "converted" };
 }
 
 /** Just the value, for the many callers that do not care how it got there. */
 export function toUnicodeBangla(value: string): string {
-  return normalizeBanglaText(value).value
+  return normalizeBanglaText(value).value;
 }
 
 /**
@@ -101,9 +101,9 @@ export function toUnicodeBangla(value: string): string {
  */
 export function forceBanglaConversion(value: string): string {
   if (!value) {
-    return value
+    return value;
   }
-  return convertBijoyToUnicode(value)
+  return convertBijoyToUnicode(value);
 }
 
 /**
@@ -115,9 +115,9 @@ export function forceBanglaConversion(value: string): string {
  * Bangla: there is nothing left to convert and pressing it would corrupt it.
  */
 export function canOfferConversion(value: string): boolean {
-  const trimmed = value.trim()
+  const trimmed = value.trim();
   if (trimmed.length === 0 || containsUnicodeBangla(trimmed)) {
-    return false
+    return false;
   }
-  return true
+  return true;
 }
