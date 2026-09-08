@@ -30,46 +30,34 @@ const PANEL = rgb(0.965, 0.968, 0.98);
 const PAPER = rgb(1, 1, 1);
 const BLACK = rgb(0, 0, 0);
 
-/** Bars are filled rectangles, so this is real ink coverage on the sheet. */
-const BARCODE_HEIGHT = 76;
-const BARCODE_MAX_WIDTH = 420;
+/**
+ * Bars are filled rectangles, so this is real ink coverage on the sheet.
+ *
+ * Sized down from 420x76, and there is a floor under how much further it can
+ * go. `MIN_MODULE_WIDTH` is the narrowest bar this will print: Code 128 is
+ * read by measuring bar widths, so shrinking the symbol shrinks the module,
+ * and past a certain point a scanner starts guessing. `barcodeMetrics` reports
+ * the module width the current numbers produce and a test holds it above the
+ * floor — otherwise "make the barcode smaller" is a change nobody can evaluate
+ * until a barcode fails to scan at a gate.
+ */
+const BARCODE_HEIGHT = 56;
+const BARCODE_MAX_WIDTH = 320;
 /** Ten modules either side, which is what the symbology requires to scan. */
 const QUIET_ZONE_MODULES = 10;
 
-/** Height of one label/value row, including its rule and the gap under it. */
-const DETAIL_ROW_HEIGHT = 26;
-/** A goods row is a table line, so it is tighter than a labelled detail. */
-const ITEM_ROW_HEIGHT = 16;
-/** Where the goods table has to stop, leaving room for the footer. */
-const CONTENT_FLOOR = MARGIN + 26;
-
 /**
- * How many product rows the back page will print before summarising the rest.
- *
- * A challan may carry up to `MAX_CHALLAN_ITEMS`, and a page is a page: past
- * this the table would run into the footer. The overflow is stated as a line
- * of its own rather than silently dropped — a back page that quietly omits
- * three products is worse than one that says it did.
+ * The narrowest bar, in points. 0.9pt is about 0.32mm — comfortably above the
+ * 0.25mm most scanners are specified to, with room for print gain on a laser
+ * printer and for a photocopy of the sheet.
  */
-export const MAX_BACK_PAGE_ITEMS = 14;
+export const MIN_MODULE_WIDTH = 0.9;
 
 export interface BackPageLayout {
   /** Where the bars sit; the symbol grows upward from here. */
   barcodeBaseline: number;
   /** The two identifier panels, measured from their bottom edge. */
   identifierY: number;
-  /** Baseline of the first detail row. */
-  detailTop: number;
-  /** Baseline of the last detail row. */
-  detailBottom: number;
-  /** Baseline of the goods table's header row. */
-  itemsTop: number;
-  /** Baseline of the total line, which is the last thing the table draws. */
-  itemsBottom: number;
-  /** Product rows that fit; anything beyond this is summarised in one line. */
-  itemsDrawn: number;
-  /** Rows there was no room for, which the table names rather than hides. */
-  itemsOmitted: number;
   footerY: number;
 }
 
@@ -83,62 +71,52 @@ export interface BackPageLayout {
  * coordinates run upward from the bottom of the page, so every number here is
  * a distance from there.
  */
-export function backPageLayout(
-  detailRows: number,
-  itemRows = 1,
-): BackPageLayout {
+export function backPageLayout(): BackPageLayout {
   const barcodeBaseline = PAGE_HEIGHT - 200;
   const identifierY = barcodeBaseline - 100;
-  const detailTop = identifierY - 34;
-  const detailBottom =
-    detailTop - Math.max(detailRows - 1, 0) * DETAIL_ROW_HEIGHT;
-
-  // The goods table starts below the details, with its own header line.
-  const itemsTop = detailBottom - DETAIL_ROW_HEIGHT;
-
-  /**
-   * What fits between the header and the floor, capped. Two rows are held
-   * back: the total, which always prints, and the overflow line when there is
-   * one. At least one product row is drawn even on an implausibly cramped
-   * page — a back page listing no goods at all would be unreadable.
-   */
-  const room = Math.floor((itemsTop - CONTENT_FLOOR) / ITEM_ROW_HEIGHT) - 2;
-  const itemsDrawn = Math.max(1, Math.min(itemRows, MAX_BACK_PAGE_ITEMS, room));
-  const itemsOmitted = Math.max(itemRows - itemsDrawn, 0);
-
-  // The rows, the overflow line when there is one, and the total.
-  const linesBelowHeader = itemsDrawn + (itemsOmitted > 0 ? 1 : 0) + 1;
-  const itemsBottom = itemsTop - linesBelowHeader * ITEM_ROW_HEIGHT;
 
   return {
     barcodeBaseline,
     identifierY,
-    detailTop,
-    detailBottom,
-    itemsTop,
-    itemsBottom,
-    itemsDrawn,
-    itemsOmitted,
-    // Below the last row, but never inside the navy bar along the bottom edge.
-    footerY: Math.max(MARGIN - 12, Math.min(MARGIN + 6, itemsBottom - 18)),
+    // Clear of the identifier panels, and never inside the navy bar along the
+    // bottom edge.
+    footerY: MARGIN - 12,
   };
 }
 
+/** The symbol's real dimensions, so how small it has got can be checked. */
+export interface BarcodeMetrics {
+  moduleCount: number;
+  /** The narrowest bar, in points. What a scanner actually has to resolve. */
+  moduleWidth: number;
+  totalWidth: number;
+  height: number;
+}
+
+export function barcodeMetrics(payload: string): BarcodeMetrics {
+  const symbol = encodeCode128B(payload);
+  const moduleCount = symbol.moduleCount + QUIET_ZONE_MODULES * 2;
+  const moduleWidth = BARCODE_MAX_WIDTH / moduleCount;
+
+  return {
+    moduleCount,
+    moduleWidth,
+    totalWidth: moduleCount * moduleWidth,
+    height: BARCODE_HEIGHT,
+  };
+}
+
+/**
+ * What the back page needs, which is now only what it prints.
+ *
+ * Two fields. The page carries the barcode, the SL number and the challan
+ * number and nothing else — see `generateChallanBackPage` for why — so a
+ * customer name or a product list reaching this far would be data travelling
+ * to a function that has no use for it.
+ */
 export interface ChallanBackPageData {
   slNumber: number;
   challanNumber: string;
-  customerName: string;
-  deliveryAddress: string;
-  thana: string;
-  district: string;
-  receiverMobile: string;
-  /** One line per product; always at least one. */
-  items: BackPageItem[];
-  sourceFileName: string;
-  sourcePageStart: number;
-  sourcePageEnd: number;
-  submittedAt: Date;
-  submittedByName: string;
 }
 
 /**
@@ -203,16 +181,6 @@ function fit(
 
   return cut.trimEnd() + "...";
 }
-
-const FILED_AT_FORMAT = new Intl.DateTimeFormat("en-GB", {
-  day: "2-digit",
-  month: "short",
-  year: "numeric",
-  hour: "2-digit",
-  minute: "2-digit",
-  hour12: false,
-  timeZone: "UTC",
-});
 
 interface Fonts {
   regular: PDFFont;
@@ -352,189 +320,21 @@ function drawIdentifier(
   });
 }
 
-interface DetailRow {
-  label: string;
-  value: string;
-}
-
-function drawDetails(
-  page: PDFPage,
-  fonts: Fonts,
-  rows: DetailRow[],
-  top: number,
-): void {
-  const labelWidth = 118;
-  const valueX = MARGIN + labelWidth;
-  const valueWidth = PAGE_WIDTH - MARGIN - valueX;
-  let y = top;
-
-  for (const row of rows) {
-    page.drawText(row.label, {
-      x: MARGIN,
-      y,
-      size: 8.5,
-      font: fonts.bold,
-      color: MUTED,
-    });
-    page.drawText(fit(row.value || "-", fonts.regular, 10, valueWidth), {
-      x: valueX,
-      y: y - 0.5,
-      size: 10,
-      font: fonts.regular,
-      color: INK,
-    });
-
-    y -= 14;
-    page.drawLine({
-      start: { x: MARGIN, y },
-      end: { x: PAGE_WIDTH - MARGIN, y },
-      thickness: 0.5,
-      color: HAIRLINE,
-    });
-    y -= DETAIL_ROW_HEIGHT - 14;
-  }
-}
-
-/** One product line as it is printed. `model` is the API's name for it. */
-export interface BackPageItem {
-  productName: string;
-  model: string;
-  qty: number;
-}
-
-/** Column edges for the goods table, measured from the left margin. */
-const ITEM_MODEL_X = MARGIN + 210;
-const ITEM_QTY_RIGHT = PAGE_WIDTH - MARGIN;
-
-/**
- * The goods, as a small table.
- *
- * A table rather than a run of labelled rows because a challan carrying six
- * products is six lines that have to be *compared* — a warehouse hand reads
- * down the quantity column, and that only works if the quantities are in a
- * column. The total is printed under it, because the figure somebody checks
- * against the physical load is the sum and not any one line.
- */
-function drawItems(
-  page: PDFPage,
-  fonts: Fonts,
-  items: BackPageItem[],
-  layout: BackPageLayout,
-): void {
-  const header = layout.itemsTop;
-
-  page.drawText("PRODUCT", {
-    x: MARGIN,
-    y: header,
-    size: 8.5,
-    font: fonts.bold,
-    color: MUTED,
-  });
-  page.drawText("MODEL", {
-    x: ITEM_MODEL_X,
-    y: header,
-    size: 8.5,
-    font: fonts.bold,
-    color: MUTED,
-  });
-
-  const qtyLabel = "QTY";
-  page.drawText(qtyLabel, {
-    x: ITEM_QTY_RIGHT - fonts.bold.widthOfTextAtSize(qtyLabel, 8.5),
-    y: header,
-    size: 8.5,
-    font: fonts.bold,
-    color: MUTED,
-  });
-
-  page.drawLine({
-    start: { x: MARGIN, y: header - 5 },
-    end: { x: PAGE_WIDTH - MARGIN, y: header - 5 },
-    thickness: 0.75,
-    color: HAIRLINE,
-  });
-
-  let y = header - ITEM_ROW_HEIGHT;
-
-  for (const item of items.slice(0, layout.itemsDrawn)) {
-    page.drawText(
-      fit(
-        winAnsiSafe(item.productName),
-        fonts.regular,
-        9.5,
-        ITEM_MODEL_X - MARGIN - 8,
-      ),
-      {
-        x: MARGIN,
-        y,
-        size: 9.5,
-        font: fonts.regular,
-        color: INK,
-      },
-    );
-
-    page.drawText(
-      fit(
-        winAnsiSafe(item.model),
-        fonts.regular,
-        9.5,
-        ITEM_QTY_RIGHT - ITEM_MODEL_X - 34,
-      ),
-      { x: ITEM_MODEL_X, y, size: 9.5, font: fonts.regular, color: INK },
-    );
-
-    const qty = String(item.qty);
-    page.drawText(qty, {
-      x: ITEM_QTY_RIGHT - fonts.bold.widthOfTextAtSize(qty, 9.5),
-      y,
-      size: 9.5,
-      font: fonts.bold,
-      color: INK,
-    });
-
-    y -= ITEM_ROW_HEIGHT;
-  }
-
-  if (layout.itemsOmitted > 0) {
-    page.drawText(
-      `+ ${layout.itemsOmitted} more product ${layout.itemsOmitted === 1 ? "line" : "lines"} — see the challan pages`,
-      { x: MARGIN, y, size: 8.5, font: fonts.regular, color: MUTED },
-    );
-    y -= ITEM_ROW_HEIGHT;
-  }
-
-  // The total, on the line the table ends on.
-  const total = items.reduce((sum, item) => sum + item.qty, 0);
-  const totalLabel = "TOTAL QUANTITY";
-
-  page.drawLine({
-    start: { x: MARGIN, y: y + ITEM_ROW_HEIGHT - 5 },
-    end: { x: PAGE_WIDTH - MARGIN, y: y + ITEM_ROW_HEIGHT - 5 },
-    thickness: 0.75,
-    color: HAIRLINE,
-  });
-
-  page.drawText(totalLabel, {
-    x: MARGIN,
-    y: y + 2,
-    size: 8.5,
-    font: fonts.bold,
-    color: MUTED,
-  });
-
-  page.drawText(String(total), {
-    x: ITEM_QTY_RIGHT - fonts.bold.widthOfTextAtSize(String(total), 11),
-    y: y + 1,
-    size: 11,
-    font: fonts.bold,
-    color: NAVY,
-  });
-}
-
 /**
  * The generated back page: one A4 sheet carrying the barcode, the SL number
- * and the challan number, with just enough supporting detail to identify the
- * delivery without turning it into a second challan.
+ * and the challan number, and nothing else.
+ *
+ * It used to repeat the customer, the delivery address, the receiver, the
+ * source pages, who filed it and the goods table. All of that is gone, and the
+ * page is better for it: every one of those values is already printed on the
+ * challan pages this sheet is bound behind, so restating them made the back
+ * page a second, worse copy of the front — one that could disagree with it
+ * after a correction, and one that carried a customer's address and phone
+ * number onto an extra sheet for no reason.
+ *
+ * What is left is what only this page has: the identifiers LBTS assigned, in a
+ * form a scanner reads and a person reads, and one that cannot go stale
+ * because the SL and the challan number never change once allocated.
  */
 export async function generateChallanBackPage(
   data: ChallanBackPageData,
@@ -552,33 +352,7 @@ export async function generateChallanBackPage(
   const page = pdf.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
   drawHeader(page, fonts);
 
-  // --- Supporting detail, decided first so the layout can be measured -----
-  const address = [data.deliveryAddress, data.thana, data.district]
-    .map((part) => winAnsiSafe(part))
-    .filter((part) => part.length > 0 && part !== "(see front page)")
-    .join(", ");
-
-  const rows: DetailRow[] = [
-    { label: "CUSTOMER", value: winAnsiSafe(data.customerName) },
-    { label: "DELIVERY", value: address || "(see front page)" },
-    { label: "RECEIVER", value: winAnsiSafe(data.receiverMobile) },
-    {
-      label: "SOURCE PAGES",
-      value:
-        data.sourcePageStart +
-        "-" +
-        data.sourcePageEnd +
-        " of " +
-        winAnsiSafe(data.sourceFileName),
-    },
-    { label: "FILED BY", value: winAnsiSafe(data.submittedByName) },
-    {
-      label: "FILED AT",
-      value: FILED_AT_FORMAT.format(data.submittedAt) + " UTC",
-    },
-  ];
-
-  const layout = backPageLayout(rows.length, data.items.length);
+  const layout = backPageLayout();
 
   // --- Barcode ------------------------------------------------------------
   const barcodeBaseline = layout.barcodeBaseline;
@@ -589,7 +363,14 @@ export async function generateChallanBackPage(
     barcodeBaseline,
   );
 
-  const readable = data.challanNumber;
+  /**
+   * The same value a scanner reads, in a form a person reads. Run through
+   * `winAnsiSafe` even though a challan number is always Latin: this is the
+   * only free text left on the page, and pdf-lib throws rather than skipping a
+   * codepoint Helvetica cannot encode — which would take down the last step of
+   * a submission for a formatting change nobody connected to it.
+   */
+  const readable = winAnsiSafe(data.challanNumber);
   page.drawText(readable, {
     x: PAGE_WIDTH / 2 - fonts.bold.widthOfTextAtSize(readable, 13) / 2,
     y: barcodeBaseline - 24,
@@ -622,12 +403,6 @@ export async function generateChallanBackPage(
     data.challanNumber,
     15,
   );
-
-  // --- Supporting detail --------------------------------------------------
-  drawDetails(page, fonts, rows, layout.detailTop);
-
-  // --- Goods ---------------------------------------------------------------
-  drawItems(page, fonts, data.items, layout);
 
   // --- Footer -------------------------------------------------------------
   page.drawText(

@@ -6,9 +6,29 @@ import type {
   LocationStatus,
   LocationType,
 } from "../location/location.constants";
+import type { Rate } from "../product-rate/product-rate.constants";
+import { totalOf } from "../product-rate/product-rate.pricing";
 import type { ChallanBatchStatus, ChallanStatus } from "./challan.constants";
 import type { ChallanBatchDocument } from "./challan-batch.model";
 import type { ChallanDocument } from "./challan.model";
+
+/**
+ * What one product line was charged, as a client sees it.
+ *
+ * The stored sub-document keeps all five rate fields so a corrected row cannot
+ * leave a stale figure behind; this is where that becomes the discriminated
+ * union a client can actually render, so nothing on the other side has to know
+ * which fields mean anything for which kind.
+ */
+export interface ChallanItemRate {
+  masterId: string;
+  /** Which column of the rate card was used. */
+  locationType: LocationType;
+  rate: Rate;
+  /** This line's charge, tiered arithmetic already done. */
+  amount: number;
+  appliedAt: string;
+}
 
 /**
  * One product line, as a client sees it.
@@ -21,6 +41,14 @@ export interface ChallanItem {
   productName: string;
   model: string;
   qty: number;
+  /** The rate card's capacity band, or blank when no row answered. */
+  capacity: string;
+  /**
+   * What this line was charged, or null because nothing costed it — a product
+   * the rate card does not carry, or a challan whose location is still
+   * Pending. Null is ordinary and never blocks anything.
+   */
+  rate: ChallanItemRate | null;
 }
 
 /** Who filed a record or last changed it, resolved to something displayable. */
@@ -104,6 +132,21 @@ export interface ChallanRecord {
   items: ChallanItem[];
   /** Every quantity added up. Derived, so a list can show one number. */
   totalQty: number;
+  /**
+   * Every priced line added up, or null because nothing on this challan could
+   * be priced.
+   *
+   * Null rather than zero, and the distinction is the point: zero is a challan
+   * that costs nothing, null is a challan nobody has costed. A report that
+   * treated them alike would quietly average one into the other.
+   */
+  totalAmount: number | null;
+  /**
+   * How many lines carry no rate. Present so a total is never shown as though
+   * it covered the whole challan when it covered three lines of four — the
+   * missing line is exactly the one somebody needs to know about.
+   */
+  unpricedItems: number;
 
   document: ChallanDocumentRef;
 
@@ -184,7 +227,52 @@ export interface DuplicateChallanCandidate {
   sourcePageStart: number;
   sourcePageEnd: number;
   /** Which probe matched, so the dialog can say why it is asking. */
-  matchedOn: "customer" | "mobile";
+  matchedOn: "batch" | "recent";
+}
+
+/**
+ * The stored rate sub-document as the union a client renders.
+ *
+ * Defensive about a line written before rates existed, and about one whose
+ * fields disagree with its kind: both come back as no rate rather than as a
+ * zero, because zero is a price and "nobody costed this" is not.
+ */
+function toItemRate(
+  stored: NonNullable<ChallanDocument["items"][number]["rate"]> | null | undefined,
+): ChallanItemRate | null {
+  if (!stored) {
+    return null;
+  }
+
+  let rate: Rate | null = null;
+
+  if (stored.kind === "flat" && typeof stored.unitAmount === "number") {
+    rate = { kind: "flat", amount: stored.unitAmount };
+  } else if (
+    stored.kind === "tiered" &&
+    typeof stored.firstQty === "number" &&
+    typeof stored.firstAmount === "number" &&
+    typeof stored.restAmount === "number"
+  ) {
+    rate = {
+      kind: "tiered",
+      firstQty: stored.firstQty,
+      firstAmount: stored.firstAmount,
+      restAmount: stored.restAmount,
+    };
+  }
+
+  if (!rate) {
+    return null;
+  }
+
+  return {
+    masterId: String(stored.masterId),
+    locationType: stored.locationType as LocationType,
+    rate,
+    amount: stored.amount,
+    appliedAt: stored.appliedAt.toISOString(),
+  };
 }
 
 /** The stored rows, with `productModel` renamed back to `model`. */
@@ -193,6 +281,8 @@ function toItems(challan: ChallanDocument): ChallanItem[] {
     productName: item.productName,
     model: item.productModel,
     qty: item.qty,
+    capacity: item.capacity ?? "",
+    rate: toItemRate(item.rate),
   }));
 }
 
@@ -254,6 +344,13 @@ export function toChallanRecord(
   actorNames: Map<string, string>,
 ): ChallanRecord {
   const id = String(challan._id);
+  const items = toItems(challan);
+  /**
+   * Derived rather than stored, exactly like `totalQty` and for the same
+   * reason: a stored total is a number that can come to disagree with the rows
+   * it is a total of, and this one would do it silently.
+   */
+  const totals = totalOf(items.map((item) => item.rate?.amount ?? null));
 
   return {
     id,
@@ -278,8 +375,10 @@ export function toChallanRecord(
     resolvedLocation: toResolvedLocation(challan, actorNames),
     locationStatus: (challan.locationStatus as LocationStatus) ?? "Pending",
 
-    items: toItems(challan),
+    items,
     totalQty: totalQtyOf(challan),
+    totalAmount: totals.total,
+    unpricedItems: totals.unpriced,
 
     document: {
       url: "/challans/" + id + "/document",

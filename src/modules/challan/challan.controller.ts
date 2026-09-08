@@ -62,7 +62,17 @@ function idFrom(req: Request): string {
 
 export async function getChallans(req: Request, res: Response): Promise<void> {
   const query = req.validated?.query as ListChallansQuery;
-  const { records, total, totalQty } = await listChallans(query);
+  const {
+    records,
+    total,
+    totalQty,
+    totalAmount,
+    unpricedChallans,
+    blankAmount,
+    partialAmount,
+    locationPending,
+    locationReview,
+  } = await listChallans(query);
 
   sendResponse(res, {
     statusCode: 200,
@@ -76,6 +86,26 @@ export async function getChallans(req: Request, res: Response): Promise<void> {
       // Summed over every matching record rather than this page, because the
       // question it answers is about the filters and not about the scroll.
       totalQty,
+      /**
+       * The same, for money — and `unpricedChallans` travels beside it rather
+       * than being left for the client to work out. A charge total that
+       * silently omits the challans nobody could price is a figure somebody
+       * would put in a report, so the count of what is missing from it is part
+       * of the answer, not a detail.
+       */
+      totalAmount,
+      unpricedChallans,
+      /**
+       * The three backlogs the toolbar draws as chips: challans nobody has
+       * charged, challans nobody has located, and locations the machine
+       * inferred that nobody has read. Counted over the same matching set as
+       * the totals beside them, so every figure in that row answers the same
+       * question.
+       */
+      blankAmount,
+      partialAmount,
+      locationPending,
+      locationReview,
     },
   });
 }

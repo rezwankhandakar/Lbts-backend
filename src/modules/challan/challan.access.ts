@@ -58,23 +58,32 @@ export function assertCanEdit(
 }
 
 /**
- * Changing a batch — which today means marking pages of the source PDF as not
- * being challans.
+ * Changing a batch — marking pages of the source PDF as not being challans,
+ * clearing its print mark, or filing another challan into it.
  *
  * Scoped like everything else in the module: the operator who worked through
  * that file, and the two roles that manage anybody's work. It is a statement
  * about a file only one person ever had, so somebody else declaring its pages
  * blank would be guessing.
+ *
+ * The boolean is what the read probes ask — a page-range check for a batch
+ * somebody may not add to is answered as "no batch" rather than as a fault,
+ * because it is a question asked repeatedly while a range is dragged.
  */
+export function canChangeBatch(
+  batch: { createdBy: unknown },
+  actor: UserDocument,
+): boolean {
+  return (
+    managesAnyRecord(actor) || String(batch.createdBy) === String(actor._id)
+  );
+}
+
 export function assertCanChangeBatch(
   batch: { createdBy: unknown },
   actor: UserDocument,
 ): void {
-  if (managesAnyRecord(actor)) {
-    return;
-  }
-
-  if (String(batch.createdBy) !== String(actor._id)) {
+  if (!canChangeBatch(batch, actor)) {
     throw new AppError(403, "You can only change batches you started.");
   }
 }

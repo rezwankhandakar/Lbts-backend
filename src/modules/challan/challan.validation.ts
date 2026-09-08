@@ -114,10 +114,12 @@ export type ChallanItemInput = z.infer<typeof challanItemSchema>;
  * the result — one creates a record and a document, the other rewrites both —
  * and not at all in what a challan is allowed to say.
  *
- * There is deliberately no `slNumber`, no `challanNumber`, no `status` and no
- * `batchId` here, in exactly the way `syncUserSchema` has no `role`. Those are
- * the server's to decide, and a field absent from the schema is one a crafted
- * request body cannot set.
+ * There is deliberately no `slNumber`, no `challanNumber` and no `status`
+ * here, in exactly the way `syncUserSchema` has no `role`. Those are the
+ * server's to decide, and a field absent from the schema is one a crafted
+ * request body cannot set. A submission may name a `batchId`, but only as a
+ * reference to a batch that already exists and that the actor may change —
+ * see `submitChallanSchema`.
  */
 const challanFields = {
   customerName: text(2, 200, "Customer name"),
@@ -296,6 +298,26 @@ export const submitChallanSchema = z
       .regex(/^[A-Za-z0-9_-]+$/, "Invalid submission key."),
     /** The operator answering the possible-duplicate question. */
     acknowledgeDuplicate: flag,
+    /**
+     * The batch this challan is joining, when the operator has come back to an
+     * unfinished source PDF rather than started a new one.
+     *
+     * Empty is the ordinary case — the first submission out of a freshly
+     * opened file, where `sessionKey` is what creates the batch. This is the
+     * other case, and it cannot be done with a session key: the browser has no
+     * way to re-derive the one yesterday's workspace generated, and a fresh
+     * key would start a *second* batch for a file that already has one,
+     * leaving its pages split across two records neither of which could ever
+     * complete.
+     *
+     * It is a reference and nothing else. The server loads the batch, refuses
+     * anybody who may not change it, and refuses a page count that disagrees
+     * with what the batch was created for. Every value the batch holds is read
+     * from the row, never from the request — which is what keeps this a
+     * pointer rather than the writable `batchId` the challan fields
+     * deliberately do not have.
+     */
+    batchId: z.union([objectId, z.literal("")]).default(""),
   })
   .superRefine(checkPageRange);
 
@@ -321,13 +343,33 @@ const challanFilterFields = {
   status: z.enum(["all", ...CHALLAN_STATUSES]).default("all"),
   district: z.string().trim().max(120).default(""),
   /**
-   * Whether the location has been settled.
+   * What state the location is in, in the sense an administrator cares about.
    *
-   * `pending` is the working list: the challans an administrator has to look
-   * at. It filters on the stored `locationStatus` rather than on the presence
-   * of a sub-document, so it is an indexed lookup rather than a scan.
+   * Two working lists rather than one, because there are two ways a challan
+   * can want attention and they are not the same job. `pending` is "nothing
+   * was determined" — somebody has to choose. `review` is "something was
+   * determined by inference and nobody has read it" — somebody has to look and
+   * either agree or correct, which is faster and easier to miss.
+   *
+   * `pending` and `verified` filter on the stored `locationStatus`, and
+   * `review` on `resolvedLocation.source`; both are indexed lookups rather
+   * than scans, which on M0 is the whole difference.
    */
-  location: z.enum(["all", "verified", "pending"]).default("all"),
+  location: z.enum(["all", "verified", "pending", "review"]).default("all"),
+  /**
+   * Whether the challan has been charged, in the sense somebody clearing a
+   * backlog cares about.
+   *
+   * `unpriced` is the list the operator asks for: the rows whose Amount column
+   * is a dash. `partial` is the quieter one — a figure that looks complete and
+   * covers three lines of four — and it is separate rather than folded in
+   * because the two have different fixes and a combined list would bury the
+   * second under the first.
+   *
+   * Both read the stored `chargeStatus`, which is an indexed lookup rather
+   * than a pass over the items array. On M0 that is the whole difference.
+   */
+  amount: z.enum(["all", "unpriced", "partial"]).default("all"),
   customer: z.string().trim().max(200).default(""),
   product: z.string().trim().max(200).default(""),
   model: z.string().trim().max(120).default(""),
@@ -398,7 +440,10 @@ export type ListBatchesQuery = z.infer<typeof listBatchesQuerySchema>;
  */
 export const duplicateQuerySchema = z.object({
   sessionKey: z.string().trim().max(64).default(""),
+  /** A resumed batch, when this workspace joined one instead of creating it. */
+  batchId: z.union([objectId, z.literal("")]).default(""),
   customerName: z.string().trim().max(200).default(""),
+  deliveryAddress: z.string().trim().max(500).default(""),
   receiverMobile: z.string().trim().max(40).default(""),
   model: z.string().trim().max(120).default(""),
   excludeId: z.union([objectId, z.literal("")]).default(""),
@@ -470,6 +515,12 @@ export type PrintedInput = z.infer<typeof printedSchema>;
 export const pageRangeQuerySchema = z
   .object({
     sessionKey: sourceFields.sessionKey,
+    /**
+     * The batch being resumed, if this workspace is finishing an earlier one.
+     * Without it a resumed session's key names no batch at all, and every
+     * range would come back free while the pages are in fact filed.
+     */
+    batchId: z.union([objectId, z.literal("")]).default(""),
     sourcePageCount: sourceFields.sourcePageCount,
     sourcePageStart: sourceFields.sourcePageStart,
     sourcePageEnd: sourceFields.sourcePageEnd,

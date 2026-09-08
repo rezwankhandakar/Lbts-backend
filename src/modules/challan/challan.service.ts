@@ -8,10 +8,12 @@ import {
   assertCanChangeBatch,
   assertCanDelete,
   assertCanEdit,
+  canChangeBatch,
 } from "./challan.access";
 import {
   MAX_BATCH_MERGE_CHALLANS,
   comparisonKey,
+  deliveryKey,
   normalizeMobile,
 } from "./challan.constants";
 import type { ChallanStatus } from "./challan.constants";
@@ -40,12 +42,15 @@ import {
   readChallanDocument,
   uploadChallanDocument,
 } from "./challan.storage";
+import { REVIEWABLE_LOCATION_SOURCES } from "../location/location.constants";
 import type {
   LocationSource,
   LocationStatus,
   LocationType,
 } from "../location/location.constants";
 import { resolveByMasterId, resolveLocation } from "../location/location.resolver";
+import type { RateKind } from "../product-rate/product-rate.constants";
+import { priceItems } from "../product-rate/product-rate.service";
 import { normalizeBanglaText } from "./lib/bangla-text";
 import {
   generateChallanBackPage,
@@ -54,7 +59,6 @@ import {
   readPageCount,
   replaceChallanBackPage,
 } from "./lib/challan-pdf";
-import type { BackPageItem } from "./lib/challan-pdf";
 import { checkRangeAgainst, pageCountOf } from "./lib/page-ranges";
 import type { ClaimedRange, RangeProblem } from "./lib/page-ranges";
 import type {
@@ -124,6 +128,8 @@ async function resolveActorNames(
     printedBy?: unknown;
     resolvedLocation?: { resolvedBy?: unknown } | null;
   }[],
+  /** Names the caller already has, so they are never looked up again. */
+  known?: Map<string, string>,
 ): Promise<Map<string, string>> {
   const ids = new Set<string>();
 
@@ -139,18 +145,41 @@ async function resolveActorNames(
     }
   }
 
-  if (ids.size === 0) {
-    return new Map();
+  const names = new Map(known ?? []);
+  const missing = [...ids].filter((id) => !names.has(id));
+
+  // Nothing left to ask about: a freshly filed challan names one person, and
+  // the caller already handed us who they are.
+  if (missing.length === 0) {
+    return names;
   }
 
-  const actors = await UserModel.find({ _id: { $in: [...ids] } }).select(
-    "name",
-  );
-  return new Map(actors.map((actor) => [String(actor._id), actor.name]));
+  const actors = await UserModel.find({ _id: { $in: missing } }).select("name");
+  for (const actor of actors) {
+    names.set(String(actor._id), actor.name);
+  }
+
+  return names;
 }
 
-async function serialize(challan: ChallanDocument): Promise<ChallanRecord> {
-  return toChallanRecord(challan, await resolveActorNames([challan]));
+/**
+ * `known` seeds the name lookup with actors the caller already holds.
+ *
+ * A freshly filed challan names one person in every actor field, and that
+ * person is the authenticated profile the request arrived with — so asking
+ * MongoDB who they are is a round trip to be told something already in
+ * memory. Passing them in skips the query entirely; anyone the caller does
+ * not know is still looked up as before.
+ */
+async function serialize(
+  challan: ChallanDocument,
+  known?: UserDocument,
+): Promise<ChallanRecord> {
+  const seed = known
+    ? new Map([[String(known._id), known.name]])
+    : undefined;
+
+  return toChallanRecord(challan, await resolveActorNames([challan], seed));
 }
 
 async function findChallan(id: string): Promise<ChallanDocument> {
@@ -170,6 +199,18 @@ export interface ListChallansResult {
   total: number;
   /** Every quantity on every matching record, not just the page on screen. */
   totalQty: number;
+  /** Every charge on every matching record. Understated by unpriced lines. */
+  totalAmount: number;
+  /** How many of them carry a line nothing priced, so the total says so. */
+  unpricedChallans: number;
+  /**
+   * The three backlogs, over the same matching set. What the toolbar chips
+   * count, and each one is the filter that finds them.
+   */
+  blankAmount: number;
+  partialAmount: number;
+  locationPending: number;
+  locationReview: number;
 }
 
 function buildListFilter(query: ListChallansQuery): QueryFilter<Challan> {
@@ -184,9 +225,29 @@ function buildListFilter(query: ListChallansQuery): QueryFilter<Challan> {
   if (query.createdBy) {
     clauses.push({ createdBy: query.createdBy });
   }
-  if (query.location !== "all") {
+  /**
+   * `review` is a different question from the other two and so a different
+   * clause. `verified` and `pending` ask whether a location exists; `review`
+   * asks who decided it — the challans that carry one the machine inferred and
+   * nobody has read. Those are `Verified` by definition, so filtering on the
+   * status as well would only add a redundant term to the query.
+   */
+  if (query.location === "review") {
+    clauses.push({
+      "resolvedLocation.source": { $in: REVIEWABLE_LOCATION_SOURCES },
+    });
+  } else if (query.location !== "all") {
     clauses.push({
       locationStatus: query.location === "verified" ? "Verified" : "Pending",
+    });
+  }
+  /**
+   * The charge backlog, off the stored status rather than the items array —
+   * an indexed lookup instead of a pass over a sub-document on every page.
+   */
+  if (query.amount !== "all") {
+    clauses.push({
+      chargeStatus: query.amount === "unpriced" ? "Unpriced" : "Partial",
     });
   }
   if (query.district) {
@@ -265,6 +326,36 @@ function buildListFilter(query: ListChallansQuery): QueryFilter<Challan> {
 interface ChallanTotals {
   total: number;
   totalQty: number;
+  /**
+   * Every charged line on every matching challan, added up.
+   *
+   * A server figure by necessity, for exactly the reason `totalQty` is: the
+   * browser never holds more than a page of rows, so anything added up there
+   * would be the total of one page pretending to be the total of a month.
+   *
+   * Lines that carry no rate contribute nothing rather than breaking the sum,
+   * which means this figure can understate what a set of challans is worth. It
+   * is reported beside the count of unpriced records rather than on its own,
+   * because a total that quietly leaves challans out is worse than no total.
+   */
+  totalAmount: number;
+  /** How many matching challans have at least one line nobody could price. */
+  unpricedChallans: number;
+  /**
+   * The three backlogs, counted over the same matching set as everything else
+   * — because they are shown beside the record count and the totals, and a
+   * figure in that row that answered a different question would be the one
+   * thing on the toolbar nobody could trust.
+   *
+   * That does mean acting on one narrows the others: filtering to the blank
+   * amounts leaves the location counts describing only those. That is the
+   * honest reading of a filtered list, and the chips show their pressed state
+   * so it is never a mystery which question is being asked.
+   */
+  blankAmount: number;
+  partialAmount: number;
+  locationPending: number;
+  locationReview: number;
 }
 
 /**
@@ -282,12 +373,84 @@ async function totalsFor(filter: QueryFilter<Challan>): Promise<ChallanTotals> {
         _id: null,
         total: { $sum: 1 },
         totalQty: { $sum: { $sum: "$items.qty" } },
+        /**
+         * `$items.rate.amount` yields one entry per line, null for the ones
+         * nothing priced, and `$sum` ignores non-numeric entries — so an
+         * unpriced line contributes nothing instead of poisoning the total.
+         */
+        totalAmount: { $sum: { $sum: "$items.rate.amount" } },
+        /**
+         * The backlogs, read off the two stored status fields rather than
+         * worked out from the arrays underneath them. That is what those
+         * fields are for — counting them any other way would mean opening
+         * every items array on every page of the list.
+         */
+        blankAmount: {
+          $sum: { $cond: [{ $eq: ["$chargeStatus", "Unpriced"] }, 1, 0] },
+        },
+        partialAmount: {
+          $sum: { $cond: [{ $eq: ["$chargeStatus", "Partial"] }, 1, 0] },
+        },
+        locationPending: {
+          $sum: { $cond: [{ $eq: ["$locationStatus", "Pending"] }, 1, 0] },
+        },
+        /**
+         * A location the machine inferred and nobody has read. The same set
+         * `REVIEWABLE_LOCATION_SOURCES` names and the `review` filter queries,
+         * so the chip and the list it leads to can never disagree about what
+         * counts.
+         */
+        locationReview: {
+          $sum: {
+            $cond: [
+              {
+                $in: [
+                  { $ifNull: ["$resolvedLocation.source", ""] },
+                  REVIEWABLE_LOCATION_SOURCES,
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
       },
     },
-    { $project: { _id: 0, total: 1, totalQty: 1 } },
+    {
+      $project: {
+        _id: 0,
+        total: 1,
+        totalQty: 1,
+        totalAmount: 1,
+        blankAmount: 1,
+        partialAmount: 1,
+        locationPending: 1,
+        locationReview: 1,
+      },
+    },
   ]);
 
-  return row ?? { total: 0, totalQty: 0 };
+  const totals = row ?? {
+    total: 0,
+    totalQty: 0,
+    totalAmount: 0,
+    blankAmount: 0,
+    partialAmount: 0,
+    locationPending: 0,
+    locationReview: 0,
+    unpricedChallans: 0,
+  };
+
+  return {
+    ...totals,
+    /**
+     * Anything not fully charged. Derived from the two rather than counted a
+     * third time: it is what the toolbar's "this total leaves some out"
+     * caveat reads, and a separate accumulator could come to disagree with the
+     * parts it is a sum of.
+     */
+    unpricedChallans: totals.blankAmount + totals.partialAmount,
+  };
 }
 
 export async function listChallans(
@@ -310,6 +473,12 @@ export async function listChallans(
     records: records.map((record) => toChallanRecord(record, names)),
     total: totals.total,
     totalQty: totals.totalQty,
+    totalAmount: totals.totalAmount,
+    unpricedChallans: totals.unpricedChallans,
+    blankAmount: totals.blankAmount,
+    partialAmount: totals.partialAmount,
+    locationPending: totals.locationPending,
+    locationReview: totals.locationReview,
   };
 }
 
@@ -537,6 +706,39 @@ async function refreshBatchProgress(batchId: unknown): Promise<void> {
 }
 
 /**
+ * The batch an operator has come back to, rather than one they are starting.
+ *
+ * A source PDF is not stored, so finishing one that was left half-processed
+ * means opening the same file again in a *new* workspace — with a new session
+ * key, which names no batch at all. The batch is therefore identified the only
+ * way it still can be: by the id the batch page handed over.
+ *
+ * Two things are checked, and the second is the one that matters. Who: the
+ * same rule as marking a page blank, because filing into somebody's batch
+ * changes what their file is a batch of. And what: a page count that disagrees
+ * with the batch's is a different document, whatever the operator picked — the
+ * pages of file B filed into batch A would be a batch that could never
+ * honestly complete, and the mismatch is the last moment anything can tell.
+ */
+async function joinBatch(
+  batchId: string,
+  sourcePageCount: number,
+  actor: UserDocument,
+): Promise<ChallanBatchDocument> {
+  const batch = await findBatch(batchId);
+  assertCanChangeBatch(batch, actor);
+
+  if (batch.sourcePageCount !== sourcePageCount) {
+    throw new AppError(
+      409,
+      `This batch was started from a ${batch.sourcePageCount}-page file and the PDF you opened has ${sourcePageCount}. Open the file this batch came from.`,
+    );
+  }
+
+  return batch;
+}
+
+/**
  * The batch this submission belongs to, created if this is the first challan
  * out of the source file.
  *
@@ -547,11 +749,18 @@ async function refreshBatchProgress(batchId: unknown): Promise<void> {
  *
  * The unique index on `{ createdBy, sessionKey }` is what makes this safe when
  * two submissions race to be the first — one inserts, the other finds.
+ *
+ * A submission naming a batch skips all of that: it is joining one that exists
+ * rather than deciding whether to create one.
  */
 async function ensureBatch(
   input: SubmitChallanInput,
   actor: UserDocument,
 ): Promise<ChallanBatchDocument> {
+  if (input.batchId) {
+    return joinBatch(input.batchId, input.sourcePageCount, actor);
+  }
+
   const batch = await ChallanBatchModel.findOneAndUpdate(
     { createdBy: actor._id, sessionKey: input.sessionKey },
     {
@@ -643,6 +852,39 @@ export async function setBatchSkippedPages(
 // Page ranges
 // ---------------------------------------------------------------------------
 
+/**
+ * The batch a workspace is working in, for the questions it asks before it
+ * submits anything.
+ *
+ * Two ways of naming one, because there are two ways to be in a workspace: a
+ * session key, which the browser generated for a file it just opened, and an
+ * id, which is a batch it came back to finish. Neither is trusted further than
+ * it goes — a key only ever finds this operator's own batch, and an id has to
+ * name one they may add to.
+ *
+ * Null covers every miss, including a batch this actor may not change. These
+ * are questions asked repeatedly while a range is being dragged, and answering
+ * one with a fault would turn a probe into an error somebody has to read.
+ */
+async function batchInPlay(
+  ref: { batchId: string; sessionKey: string },
+  actor: UserDocument,
+): Promise<ChallanBatchDocument | null> {
+  if (ref.batchId) {
+    const batch = await ChallanBatchModel.findById(ref.batchId);
+    return batch && canChangeBatch(batch, actor) ? batch : null;
+  }
+
+  if (!ref.sessionKey) {
+    return null;
+  }
+
+  return ChallanBatchModel.findOne({
+    createdBy: actor._id,
+    sessionKey: ref.sessionKey,
+  });
+}
+
 /** Ranges already spoken for in a batch, in the shape the checker wants. */
 async function claimedRangesFor(
   batchId: unknown,
@@ -691,10 +933,7 @@ export async function checkPageRangeAvailability(
   query: PageRangeQuery,
   actor: UserDocument,
 ): Promise<PageRangeAvailability> {
-  const batch = await ChallanBatchModel.findOne({
-    createdBy: actor._id,
-    sessionKey: query.sessionKey,
-  });
+  const batch = await batchInPlay(query, actor);
 
   const claimed = batch ? await claimedRangesFor(batch._id) : [];
 
@@ -743,66 +982,78 @@ export async function findDuplicateChallans(
   actor: UserDocument,
 ): Promise<DuplicateChallanCandidate[]> {
   const modelKey = query.model ? comparisonKey(query.model) : "";
-  if (!modelKey) {
+  const identity = deliveryKey(query);
+
+  /**
+   * All four or nothing. A challan missing any of them cannot be shown to be
+   * the same delivery as another, and a probe that fired on the three it did
+   * have would be asking the looser question this one exists to stop asking.
+   */
+  if (!modelKey || !identity) {
     return [];
   }
 
-  const results = new Map<string, DuplicateChallanCandidate>();
+  const since = new Date(Date.now() - DUPLICATE_LOOKBACK_DAYS * 86_400_000);
+  const batch = await batchInPlay(query, actor);
 
-  // --- Probe one: the same customer and model inside this source PDF ------
-  if (query.sessionKey && query.customerName) {
-    const batch = await ChallanBatchModel.findOne({
-      createdBy: actor._id,
-      sessionKey: query.sessionKey,
-    }).select("_id");
-
-    if (batch) {
-      const filter: QueryFilter<Challan> = {
-        batchId: batch._id,
-        customerNameKey: comparisonKey(query.customerName),
-        // Any line carrying the model counts: a split delivery repeats the same
-        // product across two challans, which is exactly what this asks about.
-        "items.productModelKey": modelKey,
-      };
-      if (query.excludeId) {
-        filter._id = { $ne: query.excludeId };
-      }
-
-      const matches = await ChallanModel.find(filter)
-        .sort({ createdAt: -1 })
-        .limit(5);
-      for (const match of matches) {
-        results.set(String(match._id), toDuplicateCandidate(match, "customer"));
-      }
-    }
+  /**
+   * One query, two scopes.
+   *
+   * Inside this source PDF, whatever its age — filing the same sheet twice out
+   * of one file is the mistake this is really for, and a batch resumed after a
+   * long gap must still be checked. And anywhere at all within the lookback
+   * window, because the same delivery filed twice out of two files is the same
+   * delivery twice.
+   *
+   * The scopes overlap, which is why they are an `$or` and not two queries:
+   * the record is either a duplicate or it is not, and asking twice would only
+   * produce two ways of saying so.
+   */
+  const scopes: QueryFilter<Challan>[] = [{ submittedAt: { $gte: since } }];
+  if (batch) {
+    scopes.push({ batchId: batch._id });
   }
 
-  // --- Probe two: the same receiver and model, recently -------------------
-  if (query.receiverMobile) {
-    const since = new Date(Date.now() - DUPLICATE_LOOKBACK_DAYS * 86_400_000);
-    const filter: QueryFilter<Challan> = {
-      receiverMobile: normalizeMobile(query.receiverMobile),
-      "items.productModelKey": modelKey,
-      submittedAt: { $gte: since },
-    };
-    if (query.excludeId) {
-      filter._id = { $ne: query.excludeId };
-    }
-
-    const matches = await ChallanModel.find(filter)
-      .sort({ createdAt: -1 })
-      .limit(5);
-    for (const match of matches) {
-      const id = String(match._id);
-      if (!results.has(id)) {
-        results.set(id, toDuplicateCandidate(match, "mobile"));
-      }
-    }
+  const filter: QueryFilter<Challan> = {
+    customerNameKey: comparisonKey(query.customerName),
+    receiverMobile: normalizeMobile(query.receiverMobile),
+    // Any line carrying the model counts: a split delivery repeats the same
+    // product across two challans, which is exactly what this asks about.
+    "items.productModelKey": modelKey,
+    $or: scopes,
+  };
+  if (query.excludeId) {
+    filter._id = { $ne: query.excludeId };
   }
+
+  /**
+   * A few more than are shown, because the address is compared here rather
+   * than in the query. Same customer, same number and same model is already
+   * narrow enough that this is a handful of documents at most — and comparing
+   * the address in memory is what saves storing and indexing a fourth
+   * comparison key for a question that is only ever asked.
+   */
+  const matches = await ChallanModel.find(filter).sort({ createdAt: -1 }).limit(20);
+
+  const candidates = matches.filter(
+    (match) =>
+      deliveryKey({
+        customerName: match.customerName,
+        deliveryAddress: match.deliveryAddress,
+        receiverMobile: match.receiverMobile,
+      }) === identity,
+  );
 
   // Five is a decision aid; a longer list is a research task nobody performs
   // with a stack of challans still to type.
-  return [...results.values()].slice(0, 5);
+  return candidates
+    .slice(0, 5)
+    .map((match) =>
+      toDuplicateCandidate(
+        match,
+        batch && String(match.batchId) === String(batch._id) ? "batch" : "recent",
+      ),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -819,24 +1070,30 @@ export async function findDuplicateChallans(
  * untouched. Numbers and identifiers are deliberately not put through it at
  * all — there is no Bangla in a quantity, and nothing to gain from asking.
  */
+/**
+ * What one line was charged, in the shape the schema stores it. All five rate
+ * fields are present so a line re-priced from a tiered rate into a flat one
+ * cannot keep a stale figure the arithmetic would later find.
+ */
+interface AppliedRate {
+  masterId: string;
+  locationType: LocationType;
+  kind: RateKind;
+  unitAmount: number | null;
+  firstQty: number | null;
+  firstAmount: number | null;
+  restAmount: number | null;
+  amount: number;
+  appliedAt: Date;
+}
+
 interface NormalizedItem {
   productName: string;
   productModel: string;
   productModelKey: string;
   qty: number;
-}
-
-/**
- * The stored rows in the shape the back page prints them — `productModel`
- * renamed back to `model`, and the comparison key dropped, because it is a
- * lookup value and has no business on a printed page.
- */
-function toBackPageItems(items: NormalizedItem[]): BackPageItem[] {
-  return items.map((item) => ({
-    productName: item.productName,
-    model: item.productModel,
-    qty: item.qty,
-  }));
+  capacity: string;
+  rate: AppliedRate | null;
 }
 
 interface NormalizedFields {
@@ -880,8 +1137,102 @@ function normalizeFields(
       productModel: item.model,
       productModelKey: comparisonKey(item.model),
       qty: item.qty,
+      /**
+       * Both filled in by `withRates` once the location is known, because
+       * neither can be decided without it: the rate card has three columns and
+       * which one applies is a fact about where the challan is going.
+       */
+      capacity: "",
+      rate: null,
     })),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Rates
+// ---------------------------------------------------------------------------
+
+/**
+ * The product lines, priced against the rate card.
+ *
+ * Everything about this follows from one thing: **the column is the location
+ * type**. A challan whose location is still Pending has no column, so it has
+ * no rate — which is not a failure and never blocks a submission. The challan
+ * is filed, numbered, barcoded and printed exactly as it would have been, and
+ * the moment somebody settles its location the lines are priced by the same
+ * function, from the same card.
+ *
+ * That is why this is called from all three places a challan's values or its
+ * location can change — submit, correct, and set-location — rather than only
+ * at submit time. Anything less would leave a challan whose location arrived
+ * five minutes late permanently uncharged, which is precisely the challan an
+ * operator would never think to look at again.
+ *
+ * A line the card does not cover comes back with no rate, and that is also
+ * ordinary. `priceItems` insists the product name match a card row; the entry
+ * form's model lookup is what puts the card's own spelling in front of the
+ * operator so that it does.
+ */
+async function withRates(
+  items: NormalizedItem[],
+  location: LocationFields,
+): Promise<NormalizedItem[]> {
+  const locationType = location.resolvedLocation?.locationType;
+
+  if (!locationType) {
+    // Cleared rather than left alone: a challan whose location has just been
+    // unset must not keep a figure that was charged on the strength of it.
+    return items.map((item) => ({ ...item, capacity: "", rate: null }));
+  }
+
+  const applications = await priceItems(
+    items.map((item) => ({
+      productName: item.productName,
+      model: item.productModel,
+      qty: item.qty,
+    })),
+    locationType,
+  );
+
+  const appliedAt = new Date();
+
+  return items.map((item, index) => {
+    const applied = applications[index];
+
+    if (!applied) {
+      return { ...item, capacity: "", rate: null };
+    }
+
+    const rate = applied.rate;
+
+    return {
+      ...item,
+      capacity: applied.capacity,
+      rate: {
+        masterId: applied.masterId,
+        locationType: applied.locationType,
+        kind: rate.kind,
+        unitAmount: rate.kind === "flat" ? rate.amount : null,
+        firstQty: rate.kind === "tiered" ? rate.firstQty : null,
+        firstAmount: rate.kind === "tiered" ? rate.firstAmount : null,
+        restAmount: rate.kind === "tiered" ? rate.restAmount : null,
+        amount: applied.amount,
+        appliedAt,
+      },
+    };
+  });
+}
+
+/** The stored lines, in the shape `withRates` prices. */
+function storedItems(challan: ChallanDocument): NormalizedItem[] {
+  return challan.items.map((item) => ({
+    productName: item.productName,
+    productModel: item.productModel,
+    productModelKey: item.productModelKey,
+    qty: item.qty,
+    capacity: item.capacity ?? "",
+    rate: null,
+  }));
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,6 +1397,23 @@ export async function setChallanLocation(
 
   challan.set("resolvedLocation", fields.resolvedLocation);
   challan.locationStatus = fields.locationStatus;
+  /**
+   * And the rates with it, which is the whole reason this endpoint is not
+   * quite as cheap as it looks.
+   *
+   * The rate card has three columns and the location is what chooses between
+   * them, so settling a location is the moment a challan filed as Pending
+   * becomes chargeable. Doing it anywhere else would leave a permanent class
+   * of uncharged challans — the ones whose location arrived late — and those
+   * are exactly the records nobody goes back to.
+   *
+   * Clearing a location clears the figures for the same reason: they were
+   * charged on the strength of a classification that no longer stands.
+   *
+   * It still does not regenerate the document. The back page prints no rate,
+   * so there is nothing on the printed sheet this could make untrue.
+   */
+  challan.set("items", await withRates(storedItems(challan), fields));
   challan.updatedBy = actor._id;
   await challan.save();
 
@@ -1216,17 +1584,45 @@ export async function submitChallan(
   try {
     const batch = await ensureBatch(input, actor);
 
-    const claimed = await claimedRangesFor(batch._id);
-    const problem = checkRangeAgainst(range, batch.sourcePageCount, claimed);
-    if (problem) {
-      throw new PageRangeError(problem);
-    }
+    const fields = normalizeFields(input);
 
-    if (!input.acknowledgeDuplicate) {
-      const duplicates = await findDuplicateChallans(
-        {
+    /**
+     * The three questions asked of the collection before anything is
+     * allocated, run **together**.
+     *
+     * They are independent reads — is this page range free, has this delivery
+     * already been filed, and where is it going — and they used to be three
+     * waits in a row. Location resolution is the expensive one because it can
+     * reach an external model, so overlapping it with two indexed queries is
+     * most of what makes a submission feel slower than it needs to.
+     *
+     * What is deliberately *not* parallelised is the order the answers are
+     * acted on. Each returns a value rather than throwing, and the refusals
+     * below happen in exactly the sequence they always did — a bad page range
+     * is reported ahead of a possible duplicate, whichever query finished
+     * first. Only an infrastructure failure can reject here, and that is a 500
+     * whichever of the three hits it.
+     *
+     * The cost is that a submission about to be refused now also pays for a
+     * location lookup it will not use. That is one read against a cached
+     * master list, and a refusal is the rare case.
+     */
+    const duplicateProbe = input.acknowledgeDuplicate
+      ? null
+      : {
           sessionKey: input.sessionKey,
+          // A resumed session's key names no batch, so the inside-this-PDF
+          // probe would find nothing without it.
+          batchId: input.batchId,
           customerName: input.customerName,
+          /**
+           * The address is part of the question now, not context beside it.
+           * One customer takes the same model to twenty branches out of one
+           * PDF, and every one of those is a different delivery — without the
+           * address and the number this asked about the organisation rather
+           * than the delivery, and fired on almost every sheet.
+           */
+          deliveryAddress: input.deliveryAddress,
           receiverMobile: input.receiverMobile,
           // The first line stands for the load. Probing every model would find
           // more matches and ask a longer question; the operator is deciding
@@ -1234,54 +1630,67 @@ export async function submitChallan(
           // same choice Gate Pass makes at submit time.
           model: input.items[0]?.model ?? "",
           excludeId: "",
-        },
-        actor,
-      );
+        };
 
-      if (duplicates.length > 0) {
-        throw new DuplicateChallanError(duplicates);
-      }
+    const [claimed, duplicates, location] = await Promise.all([
+      claimedRangesFor(batch._id),
+      duplicateProbe
+        ? findDuplicateChallans(duplicateProbe, actor)
+        : Promise.resolve([]),
+      /**
+       * `decideLocation` cannot refuse a submission: an unresolvable location
+       * comes back as blank and Pending, and the challan files exactly as it
+       * would have. That is what makes it safe to run beside the two checks
+       * that can.
+       */
+      decideLocation(
+        {
+          thana: fields.thana,
+          district: fields.district,
+          deliveryAddress: fields.deliveryAddress,
+          locationId: input.locationId,
+        },
+        null,
+        actor,
+      ),
+    ]);
+
+    const problem = checkRangeAgainst(range, batch.sourcePageCount, claimed);
+    if (problem) {
+      throw new PageRangeError(problem);
     }
 
-    const fields = normalizeFields(input);
+    if (duplicates.length > 0) {
+      throw new DuplicateChallanError(duplicates);
+    }
 
     /**
-     * Where this is going, worked out against the Location Master.
+     * The two identifiers and the rate card lookup, together.
      *
-     * Deliberately after the duplicate question and before the identifiers, so
-     * it costs nothing on a submission that is about to be refused — and it
-     * cannot refuse one itself. `decideLocation` never throws here: an
-     * unresolvable location comes back as blank and Pending, and the challan
-     * files exactly as it would have.
+     * Pricing needs the location, which is settled above, and nothing else —
+     * it does not need a challan number and the back page does not need a
+     * price. They were one after the other for no reason beyond the order they
+     * were written in.
+     *
+     * Awaited as a pair rather than started and picked up later: a promise
+     * left dangling while something between here and the create call throws
+     * becomes an unhandled rejection, and this process shuts itself down on
+     * one of those.
      */
-    const location = await decideLocation(
-      {
-        thana: fields.thana,
-        district: fields.district,
-        deliveryAddress: fields.deliveryAddress,
-        locationId: input.locationId,
-      },
-      null,
-      actor,
-    );
-
-    const identifiers = await allocateChallanIdentifiers();
+    const [identifiers, pricedItems] = await Promise.all([
+      allocateChallanIdentifiers(),
+      withRates(fields.items, location),
+    ]);
     const submittedAt = new Date();
 
+    /**
+     * Two values, because the back page prints two. Everything it used to
+     * restate — the customer, the address, the receiver, the goods — is
+     * already on the challan pages this sheet is bound behind.
+     */
     const backPage = await generateChallanBackPage({
       slNumber: identifiers.slNumber,
       challanNumber: identifiers.challanNumber,
-      customerName: fields.customerName,
-      deliveryAddress: fields.deliveryAddress,
-      thana: fields.thana,
-      district: fields.district,
-      receiverMobile: fields.receiverMobile,
-      items: toBackPageItems(fields.items),
-      sourceFileName: input.sourceFileName,
-      sourcePageStart: input.sourcePageStart,
-      sourcePageEnd: input.sourcePageEnd,
-      submittedAt,
-      submittedByName: actor.name,
     });
 
     const finalPdf = await generateChallanFinalPdf({
@@ -1304,6 +1713,9 @@ export async function submitChallan(
       sourcePageStart: input.sourcePageStart,
       sourcePageEnd: input.sourcePageEnd,
       ...fields,
+      // Priced above rather than in `normalizeFields`, because the column of
+      // the rate card that applies is decided by the location.
+      items: pricedItems,
       ...location,
       status: "Submitted",
       document: {
@@ -1320,14 +1732,21 @@ export async function submitChallan(
     // The record now owns the object, so a later failure must not delete it.
     uploadedKey = null;
 
-    await refreshBatchProgress(batch._id);
+    /**
+     * Both tail writes together. They touch different collections and neither
+     * reads what the other wrote — the batch's page counts and the
+     * idempotency claim have nothing to say to each other — so waiting for one
+     * before starting the other was a round trip spent on nothing.
+     */
+    await Promise.all([
+      refreshBatchProgress(batch._id),
+      ChallanSubmissionModel.updateOne(
+        { _id: input.submissionKey },
+        { $set: { status: "completed", challanId: challan._id } },
+      ),
+    ]);
 
-    await ChallanSubmissionModel.updateOne(
-      { _id: input.submissionKey },
-      { $set: { status: "completed", challanId: challan._id } },
-    );
-
-    return { record: await serialize(challan), wasAlreadySubmitted: false };
+    return { record: await serialize(challan, actor), wasAlreadySubmitted: false };
   } catch (error) {
     // The document was written but the record never was, so nothing points at
     // it and nothing ever will. Cleaned up rather than left as an orphan.
@@ -1409,22 +1828,19 @@ export async function updateChallan(
     actor,
   );
 
+  /**
+   * Regenerated from the two identifiers, which a correction cannot change —
+   * so the new back page is byte-for-byte what the old one said.
+   *
+   * It is rebuilt anyway rather than lifted from the stored document, because
+   * that keeps one rule ("the back page is generated from the record") instead
+   * of two, and the cost is one page of drawing. What it does mean is that a
+   * correction no longer changes anything on paper: see the note on `Amended`
+   * in CLAUDE.md.
+   */
   const backPage = await generateChallanBackPage({
     slNumber: challan.slNumber,
     challanNumber: challan.challanNumber,
-    customerName: fields.customerName,
-    deliveryAddress: fields.deliveryAddress,
-    thana: fields.thana,
-    district: fields.district,
-    receiverMobile: fields.receiverMobile,
-    items: toBackPageItems(fields.items),
-    sourceFileName: challan.sourceFileName,
-    sourcePageStart: challan.sourcePageStart,
-    sourcePageEnd: challan.sourcePageEnd,
-    // The filing date is a fact about when it was filed, not when it was last
-    // touched. A correction does not rewrite history on the printed page.
-    submittedAt: challan.submittedAt,
-    submittedByName: actor.name,
   });
 
   const stored = await readChallanDocument(previousKey);
@@ -1436,7 +1852,17 @@ export async function updateChallan(
     challan.document.pageCount,
   );
 
+  /**
+   * Re-priced from the corrected lines. A correction can change the product,
+   * the model, the quantity or the location, and every one of those changes
+   * what the challan should be charged — so the figures are worked out again
+   * rather than carried over. The card is read fresh, which means a challan
+   * corrected after a price rise is charged at the new figure; that is the
+   * right answer, because the correction is what decides the charge and it is
+   * happening now.
+   */
   challan.set(fields);
+  challan.set("items", await withRates(fields.items, location));
   challan.set("resolvedLocation", location.resolvedLocation);
   challan.locationStatus = location.locationStatus;
   challan.status = "Amended";

@@ -7,8 +7,9 @@ import {
   encodeCode128B,
 } from "./lib/code128";
 import {
-  MAX_BACK_PAGE_ITEMS,
+  MIN_MODULE_WIDTH,
   backPageLayout,
+  barcodeMetrics,
   generateChallanBackPage,
   generateChallanFinalPdf,
   mergeChallanPdfs,
@@ -106,17 +107,6 @@ describe("Code 128-B", () => {
     );
   });
 
-  it("keeps a real challan number inside a printable width", () => {
-    // 420pt of bars across A4 with 20 modules of quiet zone: the module width
-    // has to stay above the 0.25mm the symbology needs to scan reliably.
-    const symbol = encodeCode128B("LBTS-CH-2026-000001");
-    const moduleWidthPt = 420 / (symbol.moduleCount + 20);
-    const moduleWidthMm = (moduleWidthPt / 72) * 25.4;
-    assert.ok(
-      moduleWidthMm > 0.25,
-      `module width ${moduleWidthMm}mm is too narrow to scan`,
-    );
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -151,20 +141,14 @@ describe("winAnsiSafe", () => {
 // Documents
 // ---------------------------------------------------------------------------
 
+/**
+ * Two fields, because the back page prints two. Everything it used to restate
+ * — the customer, the address, the receiver, the goods — is on the challan
+ * pages this sheet is bound behind.
+ */
 const BACK_PAGE: ChallanBackPageData = {
   slNumber: 10234,
   challanNumber: "LBTS-CH-2026-000123",
-  customerName: "ABC Electronics Ltd.",
-  deliveryAddress: "House 12, Road 4",
-  thana: "Mirpur",
-  district: "Dhaka",
-  receiverMobile: "01712345678",
-  items: [{ productName: "Refrigerator", model: "WFA-2D4-GDEH-XX", qty: 2 }],
-  sourceFileName: "Walton_Challan_05_09_2026.pdf",
-  sourcePageStart: 3,
-  sourcePageEnd: 4,
-  submittedAt: new Date("2026-09-05T09:30:00.000Z"),
-  submittedByName: "Rezwan Khandakar",
 };
 
 /** Stands in for pages cut out of a source PDF, with recognisable content. */
@@ -185,86 +169,73 @@ async function makeSourcePages(
 
 describe("the back page layout", () => {
   /**
-   * The way this page breaks is somebody adding a detail row and pushing the
-   * footer off the bottom, which no assertion about a page count would ever
-   * notice. So the arithmetic is checked directly: every band inside the sheet,
-   * in order, with the footer clear of the navy bar along the bottom edge.
+   * The page carries three things now, so the arithmetic is short — but it is
+   * still checked directly rather than through a page count, because the way
+   * this page breaks is content sliding off the sheet, and a one-page
+   * assertion would pass happily while the footer sat under the navy bar.
    */
   it("keeps every band inside an A4 sheet, in order", () => {
-    const layout = backPageLayout(9);
+    const layout = backPageLayout();
 
     assert.ok(
-      layout.barcodeBaseline + 76 < 841.89,
+      layout.barcodeBaseline + 56 < 841.89,
       "the barcode runs off the top",
     );
     assert.ok(
       layout.identifierY < layout.barcodeBaseline,
       "identifiers overlap the barcode",
     );
-    assert.ok(
-      layout.detailTop < layout.identifierY,
-      "details overlap the identifiers",
-    );
-    assert.ok(layout.detailBottom < layout.detailTop);
-    assert.ok(layout.detailBottom > 0, "the detail rows run off the bottom");
+    assert.ok(layout.identifierY > 0, "the identifiers run off the bottom");
     assert.ok(layout.footerY > 6, "the footer sits inside the bottom bar");
     assert.ok(
-      layout.footerY < layout.detailBottom,
-      "the footer overlaps the last row",
+      layout.footerY < layout.identifierY,
+      "the footer overlaps the identifiers",
     );
   });
+});
 
-  it("still fits if two more detail rows are ever added", () => {
-    const layout = backPageLayout(8, 1);
-    assert.ok(layout.detailBottom > 0);
-    assert.ok(layout.footerY > 6);
-  });
+describe("the barcode's printed size", () => {
+  /**
+   * A barcode either scans or it is worthless, and shrinking it is exactly how
+   * it stops scanning: Code 128 is read by measuring bar widths, so a narrower
+   * symbol means a narrower module. This pins the floor so that the next time
+   * somebody makes it smaller, the test says no rather than a scanner at a
+   * gate saying no six weeks later.
+   */
+  it("keeps the narrowest bar above the scannable floor", () => {
+    const metrics = barcodeMetrics(challanBarcodePayload("LBTS-CH-2026-000123"));
 
-  it("keeps a long goods table inside the page", () => {
-    const layout = backPageLayout(6, MAX_BACK_PAGE_ITEMS);
-
-    assert.equal(layout.itemsDrawn, MAX_BACK_PAGE_ITEMS);
-    assert.equal(layout.itemsOmitted, 0);
     assert.ok(
-      layout.itemsTop < layout.detailBottom,
-      "goods overlap the details",
+      metrics.moduleWidth >= MIN_MODULE_WIDTH,
+      `module width ${metrics.moduleWidth.toFixed(3)}pt is below the ${MIN_MODULE_WIDTH}pt floor`,
     );
-    assert.ok(layout.itemsBottom > 0, "the goods table runs off the bottom");
-    assert.ok(
-      layout.footerY < layout.itemsBottom,
-      "the footer overlaps the total line",
-    );
-    assert.ok(layout.footerY > 6, "the footer sits inside the bottom bar");
   });
 
-  it("says how many product lines it had no room for, rather than dropping them", () => {
-    // A back page that quietly omits three products is worse than one that
-    // admits it did — the challan pages in front of it carry the full list.
-    const layout = backPageLayout(6, 30);
+  /** The identifiers are fixed-format, so the longest realistic one still fits. */
+  it("stays scannable for the longest challan number the format produces", () => {
+    const metrics = barcodeMetrics(challanBarcodePayload("LBTS-CH-2026-999999"));
 
-    assert.equal(layout.itemsDrawn, MAX_BACK_PAGE_ITEMS);
-    assert.equal(layout.itemsOmitted, 30 - MAX_BACK_PAGE_ITEMS);
-    assert.ok(layout.itemsBottom > 0);
-    assert.ok(layout.footerY > 6);
+    assert.ok(metrics.moduleWidth >= MIN_MODULE_WIDTH);
+    assert.ok(metrics.totalWidth <= 595.276 - 48 * 2, "the symbol runs into the margins");
   });
 
-  it("always draws at least one product row", () => {
-    assert.equal(backPageLayout(6, 0).itemsDrawn, 1);
+  it("is smaller than it used to be, which is the point", () => {
+    const metrics = barcodeMetrics(challanBarcodePayload("LBTS-CH-2026-000123"));
+
+    assert.ok(metrics.totalWidth < 420, "no narrower than the old symbol");
+    assert.ok(metrics.height < 76, "no shorter than the old symbol");
   });
 });
 
 describe("the generated back page", () => {
-  it("is exactly one page, however many products it lists", async () => {
-    for (const count of [1, 3, 14, 30]) {
-      const items = Array.from({ length: count }, (_, index) => ({
-        productName: "Refrigerator " + (index + 1),
-        model: "WFA-2D4-GDEH-" + index,
-        qty: index + 1,
-      }));
-
-      const bytes = await generateChallanBackPage({ ...BACK_PAGE, items });
-      assert.equal(await readPageCount(bytes), 1, count + " products");
-    }
+  /**
+   * It carries the barcode and the two identifiers and nothing else, so its
+   * size no longer depends on anything about the delivery. A challan with
+   * thirty product lines and one with a single line produce the same page.
+   */
+  it("is exactly one page, whatever the challan carries", async () => {
+    const bytes = await generateChallanBackPage(BACK_PAGE);
+    assert.equal(await readPageCount(bytes), 1);
   });
 
   it("is a real PDF", async () => {
@@ -272,15 +243,16 @@ describe("the generated back page", () => {
     assert.equal(Buffer.from(bytes.subarray(0, 5)).toString("latin1"), "%PDF-");
   });
 
-  it("survives a Bangla customer name instead of failing the submission", async () => {
-    // WinAnsi cannot draw it; the page must still be produced, because the
-    // barcode and the two identifiers are the whole reason it exists.
+  /**
+   * Nothing on the page comes from a transcribed field any more, so a Bangla
+   * customer name cannot reach the drawing step at all — which is a stronger
+   * guarantee than the one this replaced, where the page survived by
+   * substituting "(see front page)".
+   */
+  it("does not depend on any value a person typed", async () => {
     const bytes = await generateChallanBackPage({
-      ...BACK_PAGE,
-      customerName: "মোঃ আরিফ হোসেন",
-      deliveryAddress: "মিরপুর ১০",
-      thana: "মিরপুর",
-      district: "ঢাকা",
+      slNumber: 99999,
+      challanNumber: "LBTS-CH-2026-999999",
     });
     assert.equal(await readPageCount(bytes), 1);
   });
@@ -346,13 +318,7 @@ describe("regenerating a corrected challan", () => {
 
     const corrected = await replaceChallanBackPage(
       original,
-      await generateChallanBackPage({
-        ...BACK_PAGE,
-        customerName: "Corrected Ltd.",
-        items: [
-          { productName: "Refrigerator", model: "WFA-2D4-GDEH-XX", qty: 9 },
-        ],
-      }),
+      await generateChallanBackPage(BACK_PAGE),
     );
 
     // Still three original pages and exactly one back page.
@@ -368,16 +334,7 @@ describe("regenerating a corrected challan", () => {
     for (let round = 0; round < 3; round += 1) {
       document = await replaceChallanBackPage(
         document,
-        await generateChallanBackPage({
-          ...BACK_PAGE,
-          items: [
-            {
-              productName: "Refrigerator",
-              model: "WFA-2D4-GDEH-XX",
-              qty: round + 1,
-            },
-          ],
-        }),
+        await generateChallanBackPage(BACK_PAGE),
       );
     }
 

@@ -40,6 +40,30 @@ export const LOCATION_SOURCES = [
 export type LocationSource = (typeof LOCATION_SOURCES)[number]
 
 /**
+ * The sources that are a machine's *inexact* decision, and therefore the ones
+ * worth a person's eye.
+ *
+ * Two are deliberately outside the set. `master_exact` matched the master list
+ * character for character — there is nothing for a reviewer to compare, and
+ * putting it in a review queue would bury the real cases under the majority.
+ * `admin_manual` is a person's own choice, which is what a review produces;
+ * asking somebody to re-check their own decision is how a queue stops being
+ * believed.
+ *
+ * Everything else was inferred: a spelling normalised, a near-enough row
+ * picked, or a shortlist handed to Gemini. None of those is wrong by default —
+ * they simply have not been read by anybody, and a wrong district on a filed
+ * challan is invisible to everything downstream. Confirming one is a plain
+ * `PATCH /challans/:id/location` with the row it already points at, which
+ * rewrites the source as `admin_manual` and takes it out of the queue.
+ */
+export const REVIEWABLE_LOCATION_SOURCES: readonly LocationSource[] = [
+  'master_normalized',
+  'master_fuzzy',
+  'gemini_assisted',
+]
+
+/**
  * Whether a challan's location is settled.
  *
  * Two values, because there are two states worth telling apart: a location

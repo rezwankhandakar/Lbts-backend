@@ -77,23 +77,10 @@ function backPageFor(
   slNumber: number,
   challanNumber: string,
 ): ChallanBackPageData {
+  // The back page carries the two identifiers and nothing else.
   return {
     slNumber,
     challanNumber,
-    customerName: "ABC Electronics Ltd.",
-    deliveryAddress: "House 12, Road 4",
-    thana: "Mirpur",
-    district: "Dhaka",
-    receiverMobile: "01712345678",
-    items: [
-      { productName: "Refrigerator", model: "WFA-2D4-GDEH-XX", qty: 2 },
-      { productName: "Refrigerator Stand", model: "WFS-01", qty: 1 },
-    ],
-    sourceFileName: "Walton_Challan_05_09_2026.pdf",
-    sourcePageStart: 1,
-    sourcePageEnd: 2,
-    submittedAt: new Date("2026-09-05T09:30:00.000Z"),
-    submittedByName: "Operator",
   };
 }
 
@@ -116,11 +103,9 @@ async function fileChallan(
     "the extract must carry exactly as many pages as the range claims",
   );
 
-  const backPage = await generateChallanBackPage({
-    ...backPageFor(slNumber, challanNumber),
-    sourcePageStart: startPage,
-    sourcePageEnd: endPage,
-  });
+  const backPage = await generateChallanBackPage(
+    backPageFor(slNumber, challanNumber),
+  );
 
   return {
     document: await generateChallanFinalPdf({ frontPages, backPage }),
@@ -272,13 +257,9 @@ describe("correcting a filed challan", () => {
 
     const corrected = await replaceChallanBackPage(
       challan.document,
-      await generateChallanBackPage({
-        ...backPageFor(challan.slNumber, challan.challanNumber),
-        customerName: "Corrected Ltd.",
-        items: [
-          { productName: "Refrigerator", model: "WFA-2D4-GDEH-XX", qty: 9 },
-        ],
-      }),
+      await generateChallanBackPage(
+        backPageFor(challan.slNumber, challan.challanNumber),
+      ),
     );
 
     // Same shape: three original pages, one back page. The identifiers are

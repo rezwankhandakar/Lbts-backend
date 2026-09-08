@@ -45,6 +45,55 @@ export const CHALLAN_BATCH_STATUSES = ["Processing", "Completed"] as const;
 export type ChallanBatchStatus = (typeof CHALLAN_BATCH_STATUSES)[number];
 
 /**
+ * Whether a challan's lines have been charged.
+ *
+ * Three states, because there are three genuinely different situations and the
+ * middle one is the dangerous one. `Charged` is every line priced. `Unpriced`
+ * is none of them — the Amount column reads as a dash, which is at least
+ * visibly nothing. `Partial` is some of them, which renders as a figure that
+ * looks exactly like a complete one and is not; that is the case somebody
+ * would put in a report without noticing.
+ *
+ * Stored on the record rather than derived from the items, for exactly the
+ * reason `locationStatus` is: it is what the records list filters on, and
+ * deriving it in a query would mean an unindexed pass over an array on every
+ * page. On M0 that is the difference between a list and an outage.
+ *
+ * A challan with no location is `Unpriced`, and correctly so — the rate card
+ * has three columns and the location is what chooses between them, so its
+ * amount really is blank. The fix is a different one, which is why the two
+ * backlogs are counted separately.
+ */
+export const CHARGE_STATUSES = ["Charged", "Partial", "Unpriced"] as const;
+export type ChargeStatus = (typeof CHARGE_STATUSES)[number];
+
+export const INITIAL_CHARGE_STATUS: ChargeStatus = "Unpriced";
+
+/**
+ * The charge status a set of lines adds up to.
+ *
+ * One function, called wherever items are written, so the stored value can
+ * never drift from the rows it describes. An empty list is `Unpriced` rather
+ * than `Charged`: a challan carrying nothing has not been charged for
+ * anything, and calling it settled would hide it from the only list that would
+ * have shown it.
+ */
+export function chargeStatusFor(
+  items: readonly { rate?: unknown | null }[],
+): ChargeStatus {
+  if (items.length === 0) {
+    return "Unpriced";
+  }
+
+  const priced = items.filter((item) => item.rate != null).length;
+
+  if (priced === 0) {
+    return "Unpriced";
+  }
+  return priced === items.length ? "Charged" : "Partial";
+}
+
+/**
  * Module-level permissions, configured here because that is what CLAUDE.md
  * asks each module to do: a role says who someone is to the business, not what
  * they may do inside a module.
@@ -153,4 +202,43 @@ export function normalizeMobile(value: string): string {
 /** True for the eleven-digit local form this system stores. */
 export function isNormalizedMobile(value: string): boolean {
   return /^01\d{9}$/.test(value);
+}
+
+/**
+ * Who a delivery went to, reduced to something two challans can be compared
+ * on: the customer, the address and the receiver's number together.
+ *
+ * All three, and this is the whole of why. A customer and a model matching is
+ * not a duplicate — Padakhep Manabik Unnayan Kendra takes refrigerators to
+ * twenty different branches out of one PDF, and every one of those is a
+ * different delivery that looked identical to a probe asking about two fields.
+ * Adding the address and the number is what separates "the same organisation
+ * again" from "this exact sheet, twice".
+ *
+ * Null when any of the three is blank, and that is deliberate: a fingerprint
+ * built from a missing field would match every other record missing it, which
+ * is the opposite of identifying anything. No fingerprint means no duplicate
+ * question, which is the safe direction for a probe that only ever asks.
+ *
+ * Normalised rather than compared as typed, for the same reason
+ * `customerNameKey` is stored: "House 12, Road 3" and "House-12 Road 3" are
+ * one address written twice, and a probe that could not tell would never fire
+ * on the case it exists for.
+ */
+export interface DeliveryIdentity {
+  customerName: string;
+  deliveryAddress: string;
+  receiverMobile: string;
+}
+
+export function deliveryKey(identity: DeliveryIdentity): string | null {
+  const customer = comparisonKey(identity.customerName);
+  const address = comparisonKey(identity.deliveryAddress);
+  const mobile = comparisonKey(normalizeMobile(identity.receiverMobile));
+
+  if (!customer || !address || !mobile) {
+    return null;
+  }
+
+  return `${customer}|${address}|${mobile}`;
 }

@@ -89,11 +89,20 @@ const envSchema = z.object({
    */
   GEMINI_CONFIDENCE: z.preprocess(blank, z.coerce.number().min(0).max(1).default(0.85)),
   /**
-   * Short on purpose. This runs while an operator is waiting to submit a
-   * challan, and the correct answer to a slow model is to leave the location
-   * blank and carry on — not to hold up the filing.
+   * Short on purpose, and shorter than it was.
+   *
+   * This runs while an operator is waiting to submit a challan, and the
+   * correct answer to a slow model is to leave the location blank and carry on
+   * — not to hold up the filing. At eight seconds it was the single largest
+   * cost of a submission whenever the local matcher could not settle a
+   * location on its own; almost every real answer arrives inside two seconds,
+   * so the rest was spent waiting on calls that were going to fail anyway.
+   *
+   * What a timeout costs is one challan filed as `Location pending`, which is
+   * a designed outcome with a chip and a filter pointing at it — not a lost
+   * record and not a failed submission.
    */
-  GEMINI_TIMEOUT_MS: z.preprocess(blank, z.coerce.number().int().min(1000).max(30000).default(8000)),
+  GEMINI_TIMEOUT_MS: z.preprocess(blank, z.coerce.number().int().min(1000).max(30000).default(2500)),
 })
 
 const parsed = envSchema.safeParse(process.env)

@@ -8,6 +8,10 @@ import {
   suggestionQuerySchema,
   updateChallanSchema,
 } from "./challan.validation";
+import {
+  LOCATION_SOURCES,
+  REVIEWABLE_LOCATION_SOURCES,
+} from "../location/location.constants";
 
 /**
  * The request contract.
@@ -106,7 +110,6 @@ describe("submitting a challan", () => {
       slNumber: "1",
       challanNumber: "LBTS-CH-2026-000001",
       status: "Amended",
-      batchId: "68b0f0f0f0f0f0f0f0f0f0f0",
     }) as Record<string, unknown>;
 
     // The same reasoning as `role` being absent from the user sync schema:
@@ -114,7 +117,35 @@ describe("submitting a challan", () => {
     assert.equal("slNumber" in parsed, false);
     assert.equal("challanNumber" in parsed, false);
     assert.equal("status" in parsed, false);
-    assert.equal("batchId" in parsed, false);
+  });
+
+  /**
+   * The one identifier a submission may carry, and only as a reference.
+   *
+   * An operator finishing a source PDF opens it in a new workspace with a new
+   * session key, which names no batch — so the batch has to be named directly
+   * or the second half of a file would start a second batch for it. What keeps
+   * that safe is not the schema: the service loads the batch, refuses anyone
+   * who may not add to it, and refuses a page count that disagrees with it.
+   * The schema's job is only to insist it is an id.
+   */
+  it("takes a batch id, and only as an id", () => {
+    const parsed = submitChallanSchema.parse({
+      ...VALID,
+      batchId: "68b0f0f0f0f0f0f0f0f0f0f0",
+    });
+    assert.equal(parsed.batchId, "68b0f0f0f0f0f0f0f0f0f0f0");
+
+    assert.equal(
+      submitChallanSchema.safeParse({ ...VALID, batchId: "not-an-id" }).success,
+      false,
+    );
+  });
+
+  it("treats an absent batch id as a new batch rather than a fault", () => {
+    // The ordinary case: a freshly opened file, where the session key is what
+    // creates the batch.
+    assert.equal(submitChallanSchema.parse(VALID).batchId, "");
   });
 
   it("refuses a range that runs backwards", () => {
@@ -428,9 +459,35 @@ describe("the records list", () => {
       "verified",
     );
     assert.equal(
+      listChallansQuerySchema.parse({ location: "review" }).location,
+      "review",
+    );
+    assert.equal(
       listChallansQuerySchema.safeParse({ location: "Pending" }).success,
       false,
     );
+  });
+
+  /**
+   * The review queue is a set of sources, not a status, and it is the one
+   * thing about it that could silently rot: adding a sixth source without
+   * deciding which side of this line it falls on would either bury the queue
+   * or quietly empty it.
+   */
+  it("puts every inferred source in the review set, and neither of the two decided ones", () => {
+    assert.deepEqual([...REVIEWABLE_LOCATION_SOURCES], [
+      "master_normalized",
+      "master_fuzzy",
+      "gemini_assisted",
+    ]);
+
+    for (const source of LOCATION_SOURCES) {
+      assert.equal(
+        REVIEWABLE_LOCATION_SOURCES.includes(source),
+        source !== "master_exact" && source !== "admin_manual",
+        `${source} is on the wrong side of the review line`,
+      );
+    }
   });
 
   it("refuses a date range that ends before it starts", () => {

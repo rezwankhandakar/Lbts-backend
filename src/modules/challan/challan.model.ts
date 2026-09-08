@@ -6,11 +6,15 @@ import {
   LOCATION_TYPES,
   PENDING_LOCATION_STATUS,
 } from "../location/location.constants";
+import { RATE_KINDS } from "../product-rate/product-rate.constants";
 import {
   CHALLAN_STATUSES,
+  CHARGE_STATUSES,
   INITIAL_CHALLAN_STATUS,
+  INITIAL_CHARGE_STATUS,
   MAX_CHALLAN_ITEMS,
   MAX_CHALLAN_PAGES,
+  chargeStatusFor,
 } from "./challan.constants";
 
 /**
@@ -44,6 +48,49 @@ const documentSchema = new Schema(
 );
 
 /**
+ * What one product line was charged, and on whose authority.
+ *
+ * A reference plus a copy, in the same shape as `resolvedLocation` below —
+ * `masterId` says which row of the rate card answered, and everything beside
+ * it is what that row said at the time.
+ *
+ * The copy is the important half here, and it is the one place this module
+ * deliberately behaves *unlike* the location it sits next to. A challan reads
+ * its district through a reference, because a misclassified district was
+ * always wrong and correcting the master corrects every record holding it. A
+ * rate is not like that: the figure applied in March was the right figure in
+ * March, and a rise in April must not rewrite what March was charged. So the
+ * figures are copied, and correcting the card changes only what is filed next.
+ *
+ * `amount` is this line's charge with the tiered arithmetic already done, so
+ * nothing downstream has to know that a rate can have two figures. The rate
+ * itself is kept beside it because "why is this 468" is a question somebody
+ * asks, and the answer is the tier that produced it.
+ */
+const appliedRateSchema = new Schema(
+  {
+    masterId: {
+      type: Schema.Types.ObjectId,
+      ref: "ProductRate",
+      required: true,
+    },
+    /** Which column of the card was used — the challan's location type. */
+    locationType: { type: String, required: true, enum: LOCATION_TYPES },
+    kind: { type: String, required: true, enum: RATE_KINDS },
+    /** `flat` only: the charge per piece. */
+    unitAmount: { type: Number, default: null, min: 0 },
+    /** `tiered` only, as the card writes it. */
+    firstQty: { type: Number, default: null, min: 1 },
+    firstAmount: { type: Number, default: null, min: 0 },
+    restAmount: { type: Number, default: null, min: 0 },
+    /** This line's charge. Zero is a price; absent is "nobody costed it". */
+    amount: { type: Number, required: true, min: 0 },
+    appliedAt: { type: Date, required: true },
+  },
+  { _id: false },
+);
+
+/**
  * One product line on a challan.
  *
  * The stored path is `productModel`, not `model`: `model` collides with
@@ -61,6 +108,26 @@ const challanItemSchema = new Schema(
      */
     productModelKey: { type: String, required: true },
     qty: { type: Number, required: true, min: 1, max: 100000 },
+    /**
+     * The capacity band the rate card row carried — "21 to 40 kg", "Gross
+     * 151-285 Litre". Copied from the card rather than typed, and blank
+     * whenever no row answered.
+     *
+     * It is here because it is what tells somebody reading the record which of
+     * four near-identical refrigerator rates was applied to it. Without it a
+     * challan says 950 and nothing says why 950.
+     */
+    capacity: { type: String, default: "", trim: true, maxlength: 120 },
+    /**
+     * What this line was charged, or null.
+     *
+     * Null is an ordinary state and never an error. A product absent from the
+     * rate card, and a challan whose location is still Pending, both produce
+     * it — and neither stops the challan being filed, numbered, barcoded or
+     * printed. A blank rate beats a guessed one for exactly the reason a blank
+     * location does.
+     */
+    rate: { type: appliedRateSchema, default: null },
   },
   { _id: false },
 );
@@ -219,6 +286,21 @@ const challanSchema = new Schema(
       },
     },
 
+    /**
+     * Whether every line has been charged, some of them, or none.
+     *
+     * Derived from `items` by `chargeStatusFor` and stored anyway, for the
+     * same reason `locationStatus` above is: it is what the records list
+     * filters and counts on, and working it out in a query would mean an
+     * unindexed pass over an array on every page.
+     */
+    chargeStatus: {
+      type: String,
+      enum: CHARGE_STATUSES,
+      default: INITIAL_CHARGE_STATUS,
+      index: true,
+    },
+
     // --- Lifecycle ---------------------------------------------------------
     status: {
       type: String,
@@ -272,6 +354,24 @@ const challanSchema = new Schema(
 );
 
 /**
+ * `chargeStatus` is recomputed from the lines on every save, and that is the
+ * whole of how it is maintained.
+ *
+ * A derived field kept in step by its callers is a derived field that
+ * eventually drifts — there are three places items can be written (submit,
+ * correct, set-location) and a fourth would only have to forget once. Here it
+ * cannot: the value is a pure function of `items`, and nothing can save the
+ * array without the status following it.
+ *
+ * Deliberately not a virtual, because the point of storing it is that the list
+ * can filter and count on an index. A virtual would be exactly the unindexed
+ * pass over an array this exists to avoid.
+ */
+challanSchema.pre("save", async function syncChargeStatus() {
+  this.chargeStatus = chargeStatusFor(this.items ?? []);
+});
+
+/**
  * A range has to run forwards and stay within one challan's worth of pages.
  * Enforced in the service against the batch as well; this is the floor under
  * it, so a document that somehow bypassed the service still cannot be saved.
@@ -318,19 +418,53 @@ challanSchema.index({ thana: 1 });
  */
 challanSchema.index({ locationStatus: 1, createdAt: -1 });
 /**
+ * "Which challans has nobody charged?" — the other backlog, and the reason
+ * `chargeStatus` is stored at all. Compound with `createdAt` for the same
+ * reason `locationStatus` is: the answer is always newest first, so one index
+ * serves the filter and the sort together.
+ */
+challanSchema.index({ chargeStatus: 1, createdAt: -1 });
+/**
  * The reverse lookup, used when a master row is about to be removed: does
  * anything still point at it? Sparse, because most of the interesting
  * challans in a young deployment have no resolved location at all and there is
  * nothing to be gained from indexing a null.
  */
 challanSchema.index({ "resolvedLocation.masterId": 1 }, { sparse: true });
+/**
+ * "Which locations did the machine decide and nobody check?" — the review
+ * queue. Compound with `createdAt` for the same reason `locationStatus` is:
+ * the answer is always newest first, so one index serves the filter and the
+ * sort. Sparse, because a challan with no resolved location has no source to
+ * index and is answered by the `locationStatus` index instead.
+ */
+challanSchema.index(
+  { "resolvedLocation.source": 1, createdAt: -1 },
+  { sparse: true },
+);
+/**
+ * The reverse lookup, used when a rate card row is about to be removed: was
+ * anything ever charged from it? Sparse, because most lines in a young
+ * deployment carry no rate at all and there is nothing to be gained from
+ * indexing a null.
+ */
+challanSchema.index({ "items.rate.masterId": 1 }, { sparse: true });
 challanSchema.index({ customerName: 1 });
 challanSchema.index({ "items.productName": 1 });
 challanSchema.index({ "items.productModel": 1 });
-/** The duplicate probe, which asks about one delivery inside one batch. */
+/**
+ * The duplicate probe.
+ *
+ * It asks whether this exact delivery has already been filed — the same
+ * customer, address, receiver and model — so the customer and the receiver
+ * lead, which together are narrow enough to reduce the collection to a handful
+ * before anything else is compared. The address is checked in memory over
+ * those few rather than stored as a fifth comparison key, and the scope
+ * (inside this batch, or recent) is an `$or` the query applies afterwards.
+ */
 challanSchema.index({
-  batchId: 1,
   customerNameKey: 1,
+  receiverMobile: 1,
   "items.productModelKey": 1,
 });
 

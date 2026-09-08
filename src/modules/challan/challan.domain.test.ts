@@ -7,7 +7,9 @@ import {
   CHALLAN_WRITE_ROLES,
   MAX_CHALLAN_PAGES,
   canManageAnyChallan,
+  chargeStatusFor,
   comparisonKey,
+  deliveryKey,
   isNormalizedMobile,
   normalizeMobile,
 } from "./challan.constants";
@@ -415,5 +417,113 @@ describe("SL numbering", () => {
   it("starts far enough up that an SL cannot be read as a page or a quantity", () => {
     assert.equal(SL_NUMBER_BASE, 10_000);
     assert.equal(String(SL_NUMBER_BASE + 1).length, 5);
+  });
+});
+
+describe("charge status", () => {
+  /**
+   * The classification the records list filters and counts on. It is stored
+   * rather than derived, so the only thing standing between it and a wrong
+   * backlog count is this function and the pre-save hook that calls it.
+   */
+  const priced = { rate: { amount: 650 } };
+  const unpriced = { rate: null };
+
+  it("calls a challan charged when every line has a rate", () => {
+    assert.equal(chargeStatusFor([priced, priced]), "Charged");
+  });
+
+  it("calls it unpriced when no line has one", () => {
+    assert.equal(chargeStatusFor([unpriced, unpriced]), "Unpriced");
+  });
+
+  /**
+   * The state worth telling apart from the other two: it renders as a figure
+   * that looks complete and is not.
+   */
+  it("calls it partial when some lines have one and some do not", () => {
+    assert.equal(chargeStatusFor([priced, unpriced]), "Partial");
+    assert.equal(chargeStatusFor([unpriced, priced]), "Partial");
+  });
+
+  it("treats a missing rate field the same as an explicit null", () => {
+    assert.equal(chargeStatusFor([{}, {}]), "Unpriced");
+    assert.equal(chargeStatusFor([priced, {}]), "Partial");
+  });
+
+  /**
+   * A challan carrying nothing has not been charged for anything. Calling it
+   * settled would hide it from the one list that would have surfaced it.
+   */
+  it("calls a challan with no lines unpriced rather than charged", () => {
+    assert.equal(chargeStatusFor([]), "Unpriced");
+  });
+});
+
+describe("delivery identity", () => {
+  const base = {
+    customerName: "Padakhep Manabik Unnayan Kendra",
+    deliveryAddress: "House 12, Road 3, Sunamganj Sadar",
+    receiverMobile: "01713379249",
+  };
+
+  /**
+   * What makes two challans the same delivery.
+   *
+   * The rule this replaced asked only about the customer and the model, and
+   * that is not a duplicate: one organisation takes the same refrigerator to
+   * twenty branches out of a single PDF, and every one of those fired the
+   * alert. The address and the receiver's number are what separate "this
+   * customer again" from "this exact sheet, twice".
+   */
+  it("treats the same customer, address and number as one delivery", () => {
+    assert.equal(deliveryKey(base), deliveryKey({ ...base }));
+  });
+
+  it("ignores case, spacing and punctuation in the address", () => {
+    assert.equal(
+      deliveryKey(base),
+      deliveryKey({ ...base, deliveryAddress: "house-12  road 3, SUNAMGANJ sadar" }),
+    );
+  });
+
+  it("reads a mobile written four ways as one number", () => {
+    for (const written of ["+8801713379249", "8801713379249", "01713-379249", "01713 379249"]) {
+      assert.equal(deliveryKey({ ...base, receiverMobile: written }), deliveryKey(base));
+    }
+  });
+
+  /** The whole point: a different branch of the same customer is not a duplicate. */
+  it("tells two branches of the same customer apart", () => {
+    assert.notEqual(
+      deliveryKey(base),
+      deliveryKey({ ...base, deliveryAddress: "House 40, Road 9, Tangail Sadar" }),
+    );
+  });
+
+  it("tells two receivers at the same address apart", () => {
+    assert.notEqual(
+      deliveryKey(base),
+      deliveryKey({ ...base, receiverMobile: "01730793070" }),
+    );
+  });
+
+  it("tells two customers apart", () => {
+    assert.notEqual(
+      deliveryKey(base),
+      deliveryKey({ ...base, customerName: "Advanced Chemical Industries Ltd" }),
+    );
+  });
+
+  /**
+   * No fingerprint rather than a partial one. A key built from a missing field
+   * would match every other record missing it, which is the opposite of
+   * identifying anything — and the safe direction for a probe that only asks.
+   */
+  it("refuses to identify a delivery missing any of the three", () => {
+    assert.equal(deliveryKey({ ...base, customerName: "" }), null);
+    assert.equal(deliveryKey({ ...base, deliveryAddress: "" }), null);
+    assert.equal(deliveryKey({ ...base, receiverMobile: "" }), null);
+    assert.equal(deliveryKey({ ...base, deliveryAddress: "   " }), null);
   });
 });

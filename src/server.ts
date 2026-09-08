@@ -9,14 +9,17 @@ import {
 } from './config/db'
 import { ensureDnsResolvers } from './config/dns'
 import {
+  backfillChallanChargeStatus,
   backfillChallanLocations,
   foldLegacyChallanProducts,
+  priceUnpricedChallanItems,
 } from './modules/challan/challan.migration'
 import { seedLocationMaster } from './modules/location/location.seed'
 import {
   foldLegacyGatePassProducts,
   purgeCancelledGatePasses,
 } from './modules/gate-pass/gate-pass.migration'
+import { seedProductRates } from './modules/product-rate/product-rate.seed'
 import { normalizeLegacyUserRecords } from './modules/user/user.migration'
 
 let server: Server | undefined
@@ -88,6 +91,24 @@ function start(): void {
      * match against an empty one.
      */
     void seedLocationMaster().then(() => backfillChallanLocations())
+    /**
+     * The rate card, and then the challans whose lines it could not price when
+     * they were filed. Sequential for the same reason the location pair is:
+     * the backfill matches against the collection the seeder fills.
+     *
+     * It fills blanks only — a line already carrying a figure keeps it — so
+     * this is not the bulk re-pricing the module refuses. It is the challans
+     * filed before their product was on the card, and the ones filed before
+     * the matcher could see the card's model inside a longer challan code.
+     */
+    void seedProductRates()
+      .then(() => priceUnpricedChallanItems())
+      /**
+       * And then classify what is left. Last on purpose: pricing changes which
+       * lines carry a rate, so classifying before it would file records under
+       * a status the very next step invalidates.
+       */
+      .then(() => backfillChallanChargeStatus())
   })
 
   process.on('SIGTERM', () => shutdown('SIGTERM'))

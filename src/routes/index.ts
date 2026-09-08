@@ -3,6 +3,7 @@ import { administrationRoutes } from '../modules/administration/administration.r
 import { challanBatchRoutes, challanRoutes } from '../modules/challan/challan.route'
 import { gatePassRoutes } from '../modules/gate-pass/gate-pass.route'
 import { locationRoutes } from '../modules/location/location.route'
+import { productRateRoutes } from '../modules/product-rate/product-rate.route'
 import { profileRoutes } from '../modules/profile/profile.route'
 import { userRoutes } from '../modules/user/user.route'
 import { healthRoutes } from './health.route'
@@ -37,6 +38,14 @@ const routes: RouteDefinition[] = [
    * classify a delivery reads this same collection rather than growing a copy.
    */
   { path: '/locations', route: locationRoutes },
+  /**
+   * The product rate card, mounted beside the location master and for the same
+   * reason: it is reference data the operation prices against, not a records
+   * module belonging to whichever feature reads it first. Challan is that
+   * feature today; anything else that has to charge for a delivery reads this
+   * same collection rather than growing a copy of it.
+   */
+  { path: '/product-rates', route: productRateRoutes },
 ]
 
 const router = Router()
