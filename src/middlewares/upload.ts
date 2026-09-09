@@ -6,6 +6,7 @@ import {
   GATE_PASS_DOCUMENT_MIME_TYPES,
   MAX_GATE_PASS_DOCUMENT_BYTES,
 } from '../modules/gate-pass/gate-pass.constants'
+import { DOCUMENT_MIME_TYPES, MAX_DOCUMENT_BYTES } from '../modules/vendor/vendor.constants'
 import { AppError } from '../utils/app-error'
 
 /** Formats a browser can render everywhere, and sharp can decode. */
@@ -166,6 +167,80 @@ export function uploadChallanPages(req: Request, res: Response, next: NextFuncti
   uploadChallan(req, res, (error: unknown) => {
     if (error instanceof MulterError) {
       next(translateChallan(error))
+      return
+    }
+    if (error) {
+      next(error)
+      return
+    }
+    next()
+  })
+}
+
+/**
+ * A vendor or driver photo. The same contract as a profile avatar — images
+ * only, 5 MB, resized to a 512px square before storage — so it reuses the
+ * avatar parser wholesale and only renames the field.
+ *
+ * The field is `photo`, exactly as the profile endpoint's is, so the two upload
+ * paths in the client can share one helper rather than disagreeing about a
+ * form key.
+ */
+export const uploadVendorPhotoFile = uploadProfilePhoto
+
+/**
+ * A vendor compliance document — a registration certificate, a fitness
+ * certificate, a licence.
+ *
+ * Memory-only for the same reason everything else here is, and capped at the
+ * higher of the module's two limits because the parser can only enforce one
+ * size for everything. The tighter image limit is applied in
+ * `vendor.storage.ts`, once the real type is known.
+ *
+ * `fields` is higher than the avatar parser's because a document arrives with
+ * its type, number and two dates in the same multipart body as the file — the
+ * row and its attachment are created together.
+ */
+const uploadDocument = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_DOCUMENT_BYTES, files: 1, fields: 12 },
+  fileFilter(_req, file, callback) {
+    if (!(DOCUMENT_MIME_TYPES as readonly string[]).includes(file.mimetype)) {
+      callback(new AppError(400, 'Unsupported document type. Use PDF, JPG, PNG or WEBP.'))
+      return
+    }
+    callback(null, true)
+  },
+}).single('file')
+
+function translateDocument(error: MulterError): AppError {
+  const megabytes = Math.round(MAX_DOCUMENT_BYTES / (1024 * 1024))
+
+  switch (error.code) {
+    case 'LIMIT_FILE_SIZE':
+      return new AppError(
+        413,
+        `That document is larger than ${megabytes} MB. Scan it at a lower resolution.`,
+      )
+    case 'LIMIT_FILE_COUNT':
+    case 'LIMIT_UNEXPECTED_FILE':
+      return new AppError(400, 'Send exactly one file, in a field named "file".')
+    default:
+      return new AppError(400, 'The upload could not be read. Please try again.')
+  }
+}
+
+/**
+ * Optional by design: a document row may be created with its number and dates
+ * and no attachment yet, because the expiry date is what raises the compliance
+ * alert and waiting for somebody to find the scanner is how a lapsed
+ * certificate goes unnoticed. The handler treats a missing file as "no
+ * attachment" rather than as an error.
+ */
+export function uploadVendorDocumentFile(req: Request, res: Response, next: NextFunction): void {
+  uploadDocument(req, res, (error: unknown) => {
+    if (error instanceof MulterError) {
+      next(translateDocument(error))
       return
     }
     if (error) {

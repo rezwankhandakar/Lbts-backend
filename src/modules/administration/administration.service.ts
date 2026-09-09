@@ -6,7 +6,9 @@ import type { UserRole, UserStatus } from '../user/user.constants'
 import { UserModel } from '../user/user.model'
 import type { User, UserDocument } from '../user/user.model'
 import { toAdminUser } from '../user/user.serializer'
-import type { AdminUser } from '../user/user.serializer'
+import type { AdminUser, VendorRef } from '../user/user.serializer'
+import { VendorModel } from '../vendor/vendor.model'
+import type { VendorDocument } from '../vendor/vendor.model'
 import type { ListUsersQuery } from './administration.validation'
 
 export interface UserStats {
@@ -70,6 +72,39 @@ async function resolveActorNames(users: UserDocument[]): Promise<Map<string, str
   return new Map(actors.map((actor) => [String(actor._id), actor.name]))
 }
 
+/**
+ * The vendors linked to a page of accounts, resolved in one indexed lookup
+ * rather than populated row by row — the same treatment `resolveActorNames`
+ * gives its actors, and for the same reason: on M0 the difference between one
+ * `$in` and ten lookups is worth the plumbing.
+ *
+ * The administration table needs the vendor's *name*, not its id, because "John
+ * Doe · Vendor · Malek Transport" is a sentence an Admin can check and "John
+ * Doe · Vendor · 66f1a2..." is not.
+ */
+async function vendorRefsFor(users: UserDocument[]): Promise<Map<string, VendorRef>> {
+  const ids = new Set<string>()
+
+  for (const user of users) {
+    if (user.vendorId) {
+      ids.add(String(user.vendorId))
+    }
+  }
+
+  if (ids.size === 0) {
+    return new Map()
+  }
+
+  const vendors = await VendorModel.find({ _id: { $in: [...ids] } }).select('name vendorCode')
+
+  return new Map(
+    vendors.map((vendor) => [
+      String(vendor._id),
+      { id: String(vendor._id), name: vendor.name, vendorCode: vendor.vendorCode },
+    ]),
+  )
+}
+
 export async function listUsers(query: ListUsersQuery): Promise<ListUsersResult> {
   const filter = buildFilter(query)
   const skip = (query.page - 1) * query.limit
@@ -79,10 +114,13 @@ export async function listUsers(query: ListUsersQuery): Promise<ListUsersResult>
     UserModel.countDocuments(filter),
   ])
 
-  const actorNames = await resolveActorNames(users)
+  const [actorNames, vendorRefs] = await Promise.all([
+    resolveActorNames(users),
+    vendorRefsFor(users),
+  ])
 
   return {
-    users: users.map((user) => toAdminUser(user, actorNames)),
+    users: users.map((user) => toAdminUser(user, actorNames, vendorRefs)),
     total,
   }
 }
@@ -151,16 +189,44 @@ async function assertNotLastAdmin(target: UserDocument): Promise<void> {
   }
 }
 
+/**
+ * Resolves the vendor a Vendor account will speak for, and refuses an id that
+ * names nothing.
+ *
+ * The link is the whole of a Vendor user's authority — `vendorScopeOf` reads it
+ * off the profile and every endpoint in that module narrows to it — so an
+ * unchecked id here would be an account scoped to a vendor that does not exist,
+ * which fails in a way nobody could diagnose from the symptom.
+ */
+async function resolveVendorLink(vendorId: string): Promise<VendorDocument> {
+  const vendor = await VendorModel.findById(vendorId)
+
+  if (!vendor) {
+    throw new AppError(404, 'That vendor does not exist.')
+  }
+
+  return vendor
+}
+
 export async function changeUserRole(
   id: string,
   role: UserRole,
+  vendorId: string | null | undefined,
   actor: UserDocument,
 ): Promise<AdminUser> {
   const target = await findTarget(id)
 
   assertNotSelf(target, actor, 'change the role of')
 
-  if (target.role === role) {
+  /**
+   * A Vendor account may legitimately be *relinked* to a different vendor
+   * without its role changing, which is why "already this role" is only a
+   * conflict when the vendor is not moving too.
+   */
+  const relinking =
+    role === 'Vendor' && vendorId && String(target.vendorId ?? '') !== String(vendorId)
+
+  if (target.role === role && !relinking) {
     throw new AppError(409, `This user is already ${role}.`)
   }
 
@@ -168,12 +234,29 @@ export async function changeUserRole(
     await assertNotLastAdmin(target)
   }
 
+  /**
+   * The role and the link are written together, because they are one decision.
+   * Moving *to* Vendor requires a vendor — the schema enforces that — and
+   * moving away clears it, so an account promoted to Manager cannot be left
+   * carrying a relationship nothing would ever look at again.
+   */
+  if (role === 'Vendor') {
+    const vendor = await resolveVendorLink(vendorId as string)
+    target.vendorId = vendor._id
+  } else {
+    target.vendorId = null
+  }
+
   target.role = role
   target.roleUpdatedAt = new Date()
   target.roleUpdatedBy = actor._id
   await target.save()
 
-  return toAdminUser(target, new Map([[String(actor._id), actor.name]]))
+  return toAdminUser(
+    target,
+    new Map([[String(actor._id), actor.name]]),
+    await vendorRefsFor([target]),
+  )
 }
 
 export async function changeUserStatus(
@@ -203,7 +286,11 @@ export async function changeUserStatus(
   target.statusNote = status === 'Active' ? null : (note ?? null)
   await target.save()
 
-  return toAdminUser(target, new Map([[String(actor._id), actor.name]]))
+  return toAdminUser(
+    target,
+    new Map([[String(actor._id), actor.name]]),
+    await vendorRefsFor([target]),
+  )
 }
 
 /**

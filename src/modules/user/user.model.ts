@@ -47,6 +47,26 @@ const userSchema = new Schema(
     lastLoginAt: { type: Date, default: null },
 
     /**
+     * The vendor this account speaks for, and only meaningful when `role` is
+     * `Vendor`.
+     *
+     * This is the whole of a Vendor user's authority. `vendorScopeOf` in
+     * `modules/vendor/vendor.access.ts` reads it off this document — never off
+     * a token claim, never off a request body — and every endpoint in the
+     * Vendor module narrows to it. A Vendor user who sends somebody else's
+     * vendor id in a URL is answered 404, because the id they sent was never
+     * consulted.
+     *
+     * Written only by the Admin-only administration module, alongside the role
+     * it belongs to: `changeUserRole` requires one when the target role is
+     * `Vendor` and clears it when the role moves away, so the pair can never be
+     * left half set. It is deliberately absent from `syncUserSchema`, for the
+     * same reason `role` is — a client that could send it could link itself to
+     * any vendor in the collection.
+     */
+    vendorId: { type: Schema.Types.ObjectId, ref: 'Vendor', default: null, index: true },
+
+    /**
      * Lightweight provenance for administrative changes: who last touched the
      * role or the status, and when. Not an audit log — an audit log records
      * every event, this records only the latest — but it is the metadata an

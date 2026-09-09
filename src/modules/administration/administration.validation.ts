@@ -21,9 +21,30 @@ export const listUsersQuerySchema = z.object({
   status: z.enum(['all', ...USER_STATUSES]).default('all'),
 })
 
-export const updateUserRoleSchema = z.object({
-  role: z.enum(USER_ROLES),
-})
+/**
+ * Assigning a role, and — when that role is `Vendor` — the vendor it speaks for.
+ *
+ * The two travel together because they are one decision. A Vendor account with
+ * no vendor behind it can see nothing and is a support call waiting to happen,
+ * and a vendor link left behind on an account that has been promoted to Manager
+ * is a stale relationship nothing would ever notice. So the pair is validated
+ * as a pair here and written as a pair in the service: required going in,
+ * cleared coming out.
+ *
+ * `vendorId` is a reference the server resolves, never a value it trusts — the
+ * service loads the vendor and refuses an id that names nothing.
+ */
+export const updateUserRoleSchema = z
+  .object({
+    role: z.enum(USER_ROLES),
+    vendorId: z
+      .union([z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid vendor id.'), z.null()])
+      .optional(),
+  })
+  .refine((value) => value.role !== 'Vendor' || Boolean(value.vendorId), {
+    message: 'Choose the vendor this account speaks for.',
+    path: ['vendorId'],
+  })
 
 /**
  * One endpoint serves every lifecycle action — approve, reject, suspend,

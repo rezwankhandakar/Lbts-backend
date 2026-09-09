@@ -17,6 +17,17 @@ export interface PublicUser {
   emailVerified: boolean
   role: UserRole
   status: UserStatus
+  /**
+   * The vendor a `Vendor` account speaks for, and null for everybody else.
+   *
+   * Only the id, deliberately. The client uses it for one thing — knowing
+   * whether a vendor account has been linked yet, so it can offer "My Vendor"
+   * or explain why there is nothing to show — and it is never sent back: the
+   * whole of the Vendor module reads the link off the profile in MongoDB, so an
+   * id in a request body would be a second source of authority. The name that
+   * goes with it comes from `GET /vendors/me`.
+   */
+  vendorId: string | null
   createdAt: string
   lastLoginAt: string | null
 }
@@ -38,6 +49,23 @@ export interface AdminUser extends PublicUser {
   statusUpdatedAt: string | null
   statusUpdatedBy: ActorRef | null
   statusNote: string | null
+  /**
+   * The linked vendor, resolved to something displayable.
+   *
+   * The administration table needs the name rather than the id, because "John
+   * Doe · Vendor · Malek Transport" is a sentence an Admin can check at a
+   * glance and an ObjectId is not. Null for every non-Vendor account, and null
+   * for a Vendor account whose vendor has since been removed — which the panel
+   * renders as a warning rather than as a blank.
+   */
+  vendor: VendorRef | null
+}
+
+/** A vendor, reduced to what a user row has to say about it. */
+export interface VendorRef {
+  id: string
+  name: string
+  vendorCode: string
 }
 
 function toIso(value: Date | null | undefined): string | null {
@@ -55,6 +83,7 @@ export function toPublicUser(user: UserDocument): PublicUser {
     emailVerified: user.emailVerified,
     role: user.role as UserRole,
     status: user.status as UserStatus,
+    vendorId: user.vendorId ? String(user.vendorId) : null,
     createdAt: user.createdAt.toISOString(),
     lastLoginAt: toIso(user.lastLoginAt),
   }
@@ -77,7 +106,11 @@ function actorFrom(
  * every actor on the page in one query rather than populating per row — on M0
  * the difference between one $in lookup and N lookups is worth the plumbing.
  */
-export function toAdminUser(user: UserDocument, actorNames: Map<string, string>): AdminUser {
+export function toAdminUser(
+  user: UserDocument,
+  actorNames: Map<string, string>,
+  vendorRefs: Map<string, VendorRef> = new Map(),
+): AdminUser {
   return {
     ...toPublicUser(user),
     roleUpdatedAt: toIso(user.roleUpdatedAt),
@@ -85,5 +118,6 @@ export function toAdminUser(user: UserDocument, actorNames: Map<string, string>)
     statusUpdatedAt: toIso(user.statusUpdatedAt),
     statusUpdatedBy: actorFrom(user.statusUpdatedBy, actorNames),
     statusNote: user.statusNote ?? null,
+    vendor: user.vendorId ? (vendorRefs.get(String(user.vendorId)) ?? null) : null,
   }
 }

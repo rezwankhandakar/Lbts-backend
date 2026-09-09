@@ -6,6 +6,13 @@ import { locationRoutes } from '../modules/location/location.route'
 import { productRateRoutes } from '../modules/product-rate/product-rate.route'
 import { profileRoutes } from '../modules/profile/profile.route'
 import { userRoutes } from '../modules/user/user.route'
+import {
+  assignmentRoutes,
+  driverRoutes,
+  vehicleRoutes,
+  vendorDocumentRoutes,
+  vendorRoutes,
+} from '../modules/vendor/vendor.route'
 import { healthRoutes } from './health.route'
 
 interface RouteDefinition {
@@ -46,6 +53,22 @@ const routes: RouteDefinition[] = [
    * same collection rather than growing a copy of it.
    */
   { path: '/product-rates', route: productRateRoutes },
+  /**
+   * The vendor and its fleet.
+   *
+   * Five mounts rather than one nested tree. `/vendors` owns the vendor record
+   * and the lists underneath it, because a vehicle only makes sense inside a
+   * vendor when you are asking for all of them. A single vehicle, driver,
+   * assignment or document has a stable global id and is reached directly —
+   * `/vendors/:vendorId/vehicles/:vehicleId` would carry the vendor twice and
+   * invite the second copy to be trusted, which is exactly what a module whose
+   * whole security model is "the vendor comes from the profile" must not do.
+   */
+  { path: '/vendors', route: vendorRoutes },
+  { path: '/vehicles', route: vehicleRoutes },
+  { path: '/drivers', route: driverRoutes },
+  { path: '/vendor-assignments', route: assignmentRoutes },
+  { path: '/vendor-documents', route: vendorDocumentRoutes },
 ]
 
 const router = Router()

@@ -69,6 +69,29 @@ const envSchema = z.object({
    * what lands here is only what an individual submitted challan became.
    */
   R2_CHALLAN_PREFIX: z.preprocess(blank, z.string().trim().min(1).default('challans')),
+  /**
+   * Key prefix for vendor and driver photos. These are *public*, like avatars
+   * and unlike the two prefixes above — a vendor mark or a driver portrait
+   * carries no licence number and no address, and it is rendered twenty at a
+   * time in a fleet table.
+   */
+  R2_VENDOR_PREFIX: z.preprocess(blank, z.string().trim().min(1).default('vendors')),
+  /**
+   * Key prefix for vendor compliance documents — registration certificates,
+   * fitness certificates, tax tokens, licences.
+   *
+   * Its own prefix rather than sharing the one above, because the two have
+   * opposite access rules and the bucket can only express that if they sit
+   * under different keys: nothing here is ever served from
+   * `R2_PUBLIC_BASE_URL`. A registration certificate carries an owner's name
+   * and address, so the API streams it from the private bucket at
+   * GET /api/v1/vendor-documents/:id/file behind the usual auth, role and
+   * vendor-scope checks.
+   */
+  R2_VENDOR_DOCUMENT_PREFIX: z.preprocess(
+    blank,
+    z.string().trim().min(1).default('vendor-documents'),
+  ),
 
   /**
    * Gemini, which helps choose between location candidates this server has
@@ -143,12 +166,14 @@ const r2 =
         keyPrefix: trimSlashes(parsed.data.R2_KEY_PREFIX),
         gatePassKeyPrefix: trimSlashes(parsed.data.R2_GATE_PASS_PREFIX),
         challanKeyPrefix: trimSlashes(parsed.data.R2_CHALLAN_PREFIX),
+        vendorKeyPrefix: trimSlashes(parsed.data.R2_VENDOR_PREFIX),
+        vendorDocumentKeyPrefix: trimSlashes(parsed.data.R2_VENDOR_DOCUMENT_PREFIX),
       }
     : null
 
 if (!r2) {
   console.warn(
-    '[config] Cloudflare R2 is not configured — profile photo, gate pass and challan document endpoints will return 503.',
+    '[config] Cloudflare R2 is not configured — profile photo, gate pass, challan and vendor document endpoints will return 503.',
   )
 }
 

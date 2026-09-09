@@ -61,12 +61,14 @@ export async function getStats(_req: Request, res: Response): Promise<void> {
 }
 
 export async function patchUserRole(req: Request, res: Response): Promise<void> {
-  const { role } = req.validated?.body as UpdateUserRoleInput
-  const user = await changeUserRole(targetIdFrom(req), role, actorFrom(req))
+  const { role, vendorId } = req.validated?.body as UpdateUserRoleInput
+  const user = await changeUserRole(targetIdFrom(req), role, vendorId, actorFrom(req))
 
   sendResponse(res, {
     statusCode: 200,
-    message: `Role changed to ${role}`,
+    // A Vendor account is only half a decision without the vendor it speaks
+    // for, so the confirmation names it rather than reporting the role alone.
+    message: user.vendor ? `Role changed to ${role} · ${user.vendor.name}` : `Role changed to ${role}`,
     data: user,
   })
 }
