@@ -1,4 +1,5 @@
 import type { Types } from 'mongoose'
+import type { BillingStatus } from '../bill/bill.constants'
 import type { GatePassReferenceType, GatePassStatus } from './gate-pass.constants'
 import type { GatePassDocument } from './gate-pass.model'
 
@@ -65,6 +66,10 @@ export interface GatePassRecord {
   status: GatePassStatus
   document: GatePassDocumentRef | null
 
+  /** Whether what it carried is on a bill, written by the Bill module. */
+  billStatus: BillingStatus
+  billNumbers: string[]
+
   submittedAt: string | null
   statusChangedAt: string | null
   statusChangedBy: ActorRef | null
@@ -94,8 +99,8 @@ export interface DuplicateCandidate {
   /** How many more lines the record carries beyond the one shown. */
   moreItems: number
   status: GatePassStatus
-  /** Which of the two probes matched, so the dialog can say why. */
-  matchedOn: 'tripDo' | 'trip'
+  /** What matched, so the dialog can say why. The Trip DO is the only probe. */
+  matchedOn: 'tripDo'
 }
 
 function toIso(value: Date | null | undefined): string | null {
@@ -173,6 +178,9 @@ export function toGatePassRecord(
           pageCount: gatePass.document.pageCount ?? null,
         }
       : null,
+
+    billStatus: (gatePass.billStatus as BillingStatus) ?? 'Unbilled',
+    billNumbers: [...(gatePass.billNumbers ?? [])],
 
     submittedAt: toIso(gatePass.submittedAt),
     statusChangedAt: toIso(gatePass.statusChangedAt),

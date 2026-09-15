@@ -20,6 +20,14 @@ export interface ResponseMeta {
    */
   totalAmount?: number
   unpricedChallans?: number
+  /** Delivery: every challan on every matching trip. */
+  totalChallans?: number
+  /** Delivery: every trip rent and every labour bill on the matching trips. */
+  totalRent?: number
+  totalLabour?: number
+  /** Delivery: matching trips whose rent / labour bill has not been entered. */
+  blankRent?: number
+  blankLabour?: number
   /**
    * Backlog counts a list draws as chips beside its totals — how many of the
    * matching records still want somebody's attention, and for what. Challan
@@ -30,6 +38,25 @@ export interface ResponseMeta {
   partialAmount?: number
   locationPending?: number
   locationReview?: number
+  /** Challan: filed and on no trip, and split with something still to go. */
+  notDispatched?: number
+  partlyDispatched?: number
+  /** Challan: came back off a trip and not out again. */
+  returnedAtDepot?: number
+  /** Trip DO: matching rows with and without a gate pass, in rows and pieces. */
+  linkedRows?: number
+  unlinkedRows?: number
+  linkedQty?: number
+  unlinkedQty?: number
+  /** Gate Pass: pieces the linked challans say were delivered, and the rest. */
+  deliveredQty?: number
+  notDeliveredQty?: number
+  /** Trip DO: matching rows that are a return, and that are a re-send. */
+  returnRows?: number
+  resentRows?: number
+  /** Bills: matching bills still being prepared, and signed off. */
+  draftBills?: number
+  finalizedBills?: number
 }
 
 interface SuccessPayload<T> {

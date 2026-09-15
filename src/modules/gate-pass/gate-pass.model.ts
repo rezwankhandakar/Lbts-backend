@@ -1,5 +1,6 @@
 import { Schema, model } from 'mongoose'
 import type { InferSchemaType } from 'mongoose'
+import { BILLING_STATUSES } from '../bill/bill.constants'
 import {
   DEFAULT_GATE_PASS_STATUS,
   GATE_PASS_DOCUMENT_MIME_TYPES,
@@ -141,6 +142,15 @@ const gatePassSchema = new Schema(
     // --- Document ---------------------------------------------------------
     document: { type: documentSchema, default: null },
 
+    // --- Billing ----------------------------------------------------------
+    /**
+     * Whether what this gate pass carried is on a bill, through the challan
+     * rows linked to it on the Trip DO sheet, and which bills. Written by the
+     * Bill module and by nothing else — see `gatePassBillingStatusFor`.
+     */
+    billStatus: { type: String, enum: BILLING_STATUSES, default: 'Unbilled' },
+    billNumbers: { type: [String], default: [] },
+
     // --- Audit ------------------------------------------------------------
     /**
      * Always the authenticated MongoDB profile, never an id from a request
@@ -162,9 +172,10 @@ const gatePassSchema = new Schema(
  */
 gatePassSchema.index({ status: 1, createdAt: -1 })
 gatePassSchema.index({ createdAt: -1 })
-/** Date-range filtering, and the duplicate probe's second key. */
+/** "Which gate passes are not billed?" */
+gatePassSchema.index({ billStatus: 1, createdAt: -1 })
+/** Date-range filtering. */
 gatePassSchema.index({ tripDate: -1 })
-gatePassSchema.index({ tripDate: 1, vehicleNoKey: 1, 'items.productModelKey': 1 })
 /** "My gate passes" - the default view for an OpEx working through a queue. */
 gatePassSchema.index({ createdBy: 1, createdAt: -1 })
 /**

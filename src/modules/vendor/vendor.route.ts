@@ -4,6 +4,7 @@ import { auth, requireRole } from '../../middlewares/auth'
 import { requireDb } from '../../middlewares/require-db'
 import { uploadVendorDocumentFile, uploadVendorPhotoFile } from '../../middlewares/upload'
 import { validateRequest } from '../../middlewares/validate-request'
+import { vendorTripsQuerySchema } from '../delivery/delivery.validation'
 import type { UserRole } from '../user/user.constants'
 import { VENDOR_MANAGE_ROLES, VENDOR_READ_ROLES } from './vendor.constants'
 import {
@@ -15,6 +16,7 @@ import {
   deleteVendor,
   deleteVendorPhoto,
   getActivity,
+  deleteVehiclePhoto,
   getAssignableDrivers,
   getAssignableVehicles,
   getAssignments,
@@ -34,6 +36,7 @@ import {
   getVehicleHistory,
   getVehicleOne,
   getVehicles,
+  getVendorTrips,
   getVendors,
   patchAssignmentEnd,
   patchDocument,
@@ -49,6 +52,7 @@ import {
   postDriverPhoto,
   postVehicle,
   postVehicleDocument,
+  postVehiclePhoto,
   postVendor,
   postVendorPhoto,
 } from './vendor.controller'
@@ -147,6 +151,16 @@ vendors.post('/', canManage, validateRequest({ body: createVendorSchema }), post
 
 vendors.get('/:id', validateRequest({ params: idParamSchema }), getOne)
 vendors.get('/:id/summary', validateRequest({ params: idParamSchema }), getSummary)
+/**
+ * The vendor's trips. Here rather than under `/deliveries`, because this router
+ * is the one whose read set includes `Vendor` and whose every handler narrows
+ * by `vendorScopeOf` — a Vendor account reaches its own trips and nobody else's.
+ */
+vendors.get(
+  '/:id/trips',
+  validateRequest({ params: idParamSchema, query: vendorTripsQuerySchema }),
+  getVendorTrips,
+)
 vendors.get(
   '/:id/activity',
   validateRequest({ params: idParamSchema, query: activityQuerySchema }),
@@ -270,6 +284,29 @@ vehicles.patch(
   patchVehicleStatus,
 )
 vehicles.delete('/:id', canManage, validateRequest({ params: idParamSchema }), deleteVehicle)
+
+/**
+ * A vehicle's own picture. Public bucket, like a vendor mark and a driver
+ * portrait and unlike this vehicle's papers — a plate is painted on the outside
+ * of a lorry, a registration certificate carries an owner's address.
+ *
+ * The parser runs after the role check, so an unauthorised upload is never even
+ * read off the wire.
+ */
+vehicles.post(
+  '/:id/photo',
+  canManage,
+  uploadLimiter,
+  validateRequest({ params: idParamSchema }),
+  uploadVendorPhotoFile,
+  postVehiclePhoto,
+)
+vehicles.delete(
+  '/:id/photo',
+  canManage,
+  validateRequest({ params: idParamSchema }),
+  deleteVehiclePhoto,
+)
 
 /**
  * Filing a document against a vehicle.

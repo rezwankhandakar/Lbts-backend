@@ -2,7 +2,7 @@ import type { Types } from 'mongoose'
 import { UserModel } from '../user/user.model'
 import type { UserDocument } from '../user/user.model'
 import { MAX_ACTIVITY_ENTRIES } from './vendor.constants'
-import type { ActivityAction } from './vendor.constants'
+import type { ActivityAction, ActivityEntityType } from './vendor.constants'
 import { VendorActivityModel } from './vendor-activity.model'
 import { toActivityRecord } from './vendor.serializer'
 import type { ActivityRecord } from './vendor.serializer'
@@ -19,7 +19,7 @@ import type { ActivityRecord } from './vendor.serializer'
 export interface ActivityInput {
   vendorId: Types.ObjectId | string
   action: ActivityAction
-  entityType: 'Vendor' | 'Vehicle' | 'Driver' | 'Assignment' | 'Document'
+  entityType: ActivityEntityType
   entityId?: Types.ObjectId | string | null
   /** A copy, not a reference — the row still has to read after a deletion. */
   entityLabel?: string

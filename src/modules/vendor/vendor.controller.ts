@@ -35,13 +35,17 @@ import {
 import { getVendorStats, getVendorSummary } from './summary.service'
 import {
   changeVehicleStatus,
+  clearVehiclePhoto,
   createVehicle,
   getVehicle,
   listAssignableVehicles,
   listVehicles,
   removeVehicle,
+  setVehiclePhoto,
   updateVehicle,
 } from './vehicle.service'
+import { listVendorTrips } from '../delivery/delivery.vendor-trips'
+import type { VendorTripsQuery } from '../delivery/delivery.validation'
 import { listActivity } from './vendor.activity'
 import { ownVendorIdOf } from './vendor.access'
 import {
@@ -191,6 +195,30 @@ export async function getActivity(req: Request, res: Response): Promise<void> {
   })
 }
 
+/**
+ * A vendor's own trips, for the vendor's Trips tab — which a Vendor account
+ * reads too. Scope first, exactly as the activity log does: `getVendor` answers
+ * 404 for a vendor outside the caller's scope, so this cannot be pointed at
+ * somebody else's fleet. The list itself is the Delivery module's, built from a
+ * projection that never touches a customer.
+ */
+export async function getVendorTrips(req: Request, res: Response): Promise<void> {
+  const query = req.validated?.query as VendorTripsQuery
+  const id = idFrom(req)
+
+  await getVendor(id, actorFrom(req))
+
+  const { records, total, totalQty, totalRent, totalLabour, blankRent, blankLabour } =
+    await listVendorTrips(id, query)
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Trips retrieved',
+    data: records,
+    meta: { ...metaFor(query, total), totalQty, totalRent, totalLabour, blankRent, blankLabour },
+  })
+}
+
 export async function postVendor(req: Request, res: Response): Promise<void> {
   const input = req.validated?.body as CreateVendorInput
 
@@ -319,6 +347,27 @@ export async function patchVehicleStatus(req: Request, res: Response): Promise<v
     statusCode: 200,
     message: `Vehicle marked ${input.status}`,
     data: await changeVehicleStatus(idFrom(req), input, actorFrom(req)),
+  })
+}
+
+export async function postVehiclePhoto(req: Request, res: Response): Promise<void> {
+  const file = req.file
+  if (!file) {
+    throw new AppError(400, 'Choose an image to upload.')
+  }
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Vehicle photo updated',
+    data: await setVehiclePhoto(idFrom(req), file.buffer, actorFrom(req)),
+  })
+}
+
+export async function deleteVehiclePhoto(req: Request, res: Response): Promise<void> {
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Vehicle photo removed',
+    data: await clearVehiclePhoto(idFrom(req), actorFrom(req)),
   })
 }
 

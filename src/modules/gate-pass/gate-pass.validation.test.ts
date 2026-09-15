@@ -216,7 +216,17 @@ describe('listGatePassesQuerySchema', () => {
 
     assert.equal(parsed.page, 1)
     assert.equal(parsed.limit, 10)
-    assert.equal(parsed.status, 'all')
+    assert.deepEqual(parsed.columns, {})
+  })
+
+  it('reads the column dropdowns’ ticks, blanks as null', () => {
+    const parsed = listGatePassesQuerySchema.parse({ columns: '{"csd":["CSD-01",null],"qty":[4]}' })
+    assert.deepEqual(parsed.columns, { csd: ['CSD-01', null], qty: [4] })
+  })
+
+  it('refuses column filters that are not JSON or name no column', () => {
+    assert.equal(listGatePassesQuerySchema.safeParse({ columns: '{csd' }).success, false)
+    assert.equal(listGatePassesQuerySchema.safeParse({ columns: '{"password":["x"]}' }).success, false)
   })
 
   it('caps the page size so a crafted query cannot ask for the collection', () => {
@@ -245,8 +255,18 @@ describe('duplicateQuerySchema', () => {
     const parsed = duplicateQuerySchema.parse({ tripDo: '5044181' })
 
     assert.equal(parsed.tripDo, '5044181')
-    assert.equal(parsed.tripDate, '')
     assert.equal(parsed.excludeId, '')
+  })
+
+  it('asks about the Trip DO alone, not a vehicle, model and date', () => {
+    const parsed = duplicateQuerySchema.parse({
+      tripDo: '5044181',
+      vehicleNo: 'DHAKA METRO-NA-15-1469',
+      model: 'WFE-2H2-GDEN',
+      tripDate: '2026-09-14',
+    })
+
+    assert.deepEqual(Object.keys(parsed).sort(), ['excludeId', 'tripDo'])
   })
 })
 

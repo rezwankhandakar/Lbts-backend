@@ -2,8 +2,19 @@ import type { QueryFilter } from 'mongoose'
 import { getObjectStream } from '../../config/r2'
 import type { ObjectStream } from '../../config/r2'
 import { AppError } from '../../utils/app-error'
+import { refreshBillingStatus } from '../bill/bill.status'
 import { UserModel } from '../user/user.model'
 import type { UserDocument } from '../user/user.model'
+import {
+  assertGatePassEditKeepsLinks,
+  assertGatePassNotLinked,
+  DELIVERED_SHARE,
+  deliveryByGatePassLine,
+  LINKED_LINE_KEY,
+  refreshGatePassLinkCopies,
+} from '../trip-do/trip-do.links'
+import type { GatePassLineDelivery } from '../trip-do/trip-do.links'
+import { TripDoLineModel } from '../trip-do/trip-do.model'
 import { assertCanDelete, assertCanEdit, assertCanView, visibilityFilter } from './gate-pass.access'
 import {
   canTransitionGatePass,
@@ -18,9 +29,20 @@ import { toDuplicateCandidate, toGatePassRecord } from './gate-pass.serializer'
 import type { DuplicateCandidate, GatePassRecord } from './gate-pass.serializer'
 import { discardGatePassDocument, uploadGatePassDocument } from './gate-pass.storage'
 import type { UploadDocumentInput } from './gate-pass.storage'
+import { compareColumnValues, toColumnValuesResult } from '../../utils/column-filters'
+import type { ColumnValue, ColumnValuesResult } from '../../utils/column-filters'
+import {
+  gatePassColumnValue,
+  gatePassColumnValuesStages,
+  hasDeliveryFilter,
+  lineConditions,
+  lineMatchesColumns,
+  recordFilterClauses,
+} from './gate-pass.columns'
 import type {
   CreateGatePassInput,
   DuplicateQuery,
+  GatePassColumnValuesQuery,
   GatePassFilterQuery,
   ListGatePassesQuery,
   ReviewGatePassInput,
@@ -30,9 +52,19 @@ import type {
   UpdateGatePassInput,
 } from './gate-pass.validation'
 
+/**
+ * A gate pass as the records sheet draws it: the record, and beside each of
+ * its product lines what the challans linked to that line on the Trip DO sheet
+ * say about delivery. `lineDelivery[i]` belongs to `items[i]`.
+ */
+export type GatePassListRecord = GatePassRecord & { lineDelivery: GatePassLineDelivery[] }
+
 export interface ListGatePassesResult {
-  records: GatePassRecord[]
+  records: GatePassListRecord[]
   total: number
+  /** Pieces on the matching gate passes that challans say were delivered, and the rest. */
+  deliveredQty: number
+  notDeliveredQty: number
   /**
    * Every quantity on every matching record, not just the page on screen.
    * The whole point of the figure is that it answers "how much did these
@@ -100,7 +132,12 @@ async function serialize(record: GatePassDocument): Promise<GatePassRecord> {
   return toGatePassRecord(record, names)
 }
 
-function buildListFilter(query: GatePassFilterQuery, viewer: UserDocument): QueryFilter<GatePass> {
+/**
+ * Everything the database can answer: visibility, the toolbar, the gate
+ * pass-level column filters, and the line filters on one line together. The
+ * delivery status column is the one thing it cannot — see `buildListFilter`.
+ */
+function baseListFilter(query: GatePassFilterQuery, viewer: UserDocument): QueryFilter<GatePass> {
   const clauses: QueryFilter<GatePass>[] = []
 
   const visibility = visibilityFilter(viewer)
@@ -108,23 +145,21 @@ function buildListFilter(query: GatePassFilterQuery, viewer: UserDocument): Quer
     clauses.push(visibility)
   }
 
-  if (query.status !== 'all') {
-    clauses.push({ status: query.status })
+  for (const clause of recordFilterClauses(query.columns)) {
+    clauses.push(clause as QueryFilter<GatePass>)
   }
 
-  if (query.csd) {
-    clauses.push({ csd: query.csd.toUpperCase() })
+  const line = lineConditions(query.columns)
+  if (line) {
+    // One line must meet every line filter at once.
+    clauses.push({ items: { $elemMatch: line } } as QueryFilter<GatePass>)
   }
 
-  if (query.unit) {
-    clauses.push({ unit: query.unit.toUpperCase() })
+  if (query.bill === 'unbilled') {
+    clauses.push({ billStatus: { $nin: ['Partial', 'Billed'] } })
+  } else if (query.bill !== 'all') {
+    clauses.push({ billStatus: query.bill === 'partial' ? 'Partial' : 'Billed' })
   }
-
-  if (query.product) {
-    // Matches a record where *any* line carries the product.
-    clauses.push({ 'items.productName': new RegExp(escapeRegex(query.product), 'i') })
-  }
-
   if (query.referenceType !== 'all') {
     clauses.push({ referenceType: query.referenceType })
   }
@@ -174,6 +209,103 @@ function buildListFilter(query: GatePassFilterQuery, viewer: UserDocument): Quer
   return clauses.length > 0 ? { $and: clauses } : {}
 }
 
+/**
+ * Gate passes one delivery-status question may read. Delivery status lives on
+ * the Trip DO links rather than on the gate pass, so it is worked out per line
+ * in memory — and past this many the operator is asked to narrow the dates or
+ * another column first, rather than handed an answer about some of them.
+ */
+const MAX_DELIVERY_SCAN = 5000
+
+interface LineCandidate {
+  record: GatePassDocument
+  lines: { item: GatePassDocument['items'][number]; status: string }[]
+}
+
+async function loadLineCandidates(filter: QueryFilter<GatePass>): Promise<LineCandidate[]> {
+  const records = await GatePassModel.find(filter)
+    .select('tripDo tripDate csd unit vehicleNo customerName status items')
+    .limit(MAX_DELIVERY_SCAN + 1)
+
+  if (records.length > MAX_DELIVERY_SCAN) {
+    throw new AppError(
+      400,
+      `Delivery status is worked out gate pass by gate pass, and these filters match more than ${MAX_DELIVERY_SCAN}. Narrow the dates or another column first.`,
+    )
+  }
+
+  const delivery = await deliveryByGatePassLine(records.map((record) => record._id))
+  return records.map((record) => {
+    const lines = delivery.get(String(record._id))
+    return {
+      record,
+      lines: record.items.map((item) => ({
+        item,
+        status: lines?.get(item.productModelKey)?.status ?? 'Unlinked',
+      })),
+    }
+  })
+}
+
+/**
+ * The records list filter. Without a delivery status tick it is the database
+ * filter alone; with one, it is narrowed to the gate passes one of whose lines
+ * meets every line filter *and* reads a ticked delivery status.
+ */
+async function buildListFilter(
+  query: GatePassFilterQuery,
+  viewer: UserDocument,
+): Promise<QueryFilter<GatePass>> {
+  const base = baseListFilter(query, viewer)
+  if (!hasDeliveryFilter(query.columns)) {
+    return base
+  }
+
+  const ids = (await loadLineCandidates(base))
+    .filter(({ lines }) => lines.some((line) => lineMatchesColumns(line.item, line.status, query.columns)))
+    .map(({ record }) => record._id)
+
+  return { $and: [base, { _id: { $in: ids } }] }
+}
+
+/**
+ * The distinct values in one column, counted in sheet rows, under every filter
+ * in use except that column's own — so the dropdown still offers what was
+ * unticked, the way a spreadsheet's does.
+ */
+export async function listGatePassColumnValues(
+  query: GatePassColumnValuesQuery,
+  viewer: UserDocument,
+): Promise<ColumnValuesResult> {
+  const { column, ...rest } = query
+  const columns = { ...rest.columns }
+  delete columns[column]
+  const others = { ...rest, columns }
+
+  if (column !== 'delivery' && !hasDeliveryFilter(columns)) {
+    const rows = await GatePassModel.aggregate<{ _id: ColumnValue; count: number }>([
+      { $match: baseListFilter(others, viewer) },
+      ...gatePassColumnValuesStages(column, columns),
+    ])
+    return toColumnValuesResult(rows)
+  }
+
+  const counts = new Map<string, { value: ColumnValue; count: number }>()
+  for (const { record, lines } of await loadLineCandidates(baseListFilter(others, viewer))) {
+    for (const line of lines) {
+      if (!lineMatchesColumns(line.item, line.status, columns)) continue
+      const value = gatePassColumnValue(column, record, line.item, line.status)
+      const key = JSON.stringify(value)
+      const entry = counts.get(key) ?? { value, count: 0 }
+      entry.count += 1
+      counts.set(key, entry)
+    }
+  }
+
+  const sorted = [...counts.values()].sort((a, b) => compareColumnValues(a.value, b.value))
+  return toColumnValuesResult(sorted.map((entry) => ({ _id: entry.value, count: entry.count })))
+}
+
 interface GatePassTotals {
   total: number
   totalQty: number
@@ -199,24 +331,100 @@ async function totalsFor(filter: QueryFilter<GatePass>): Promise<GatePassTotals>
   return row ?? { total: 0, totalQty: 0 }
 }
 
+/**
+ * Delivered pieces over every matching gate pass — the figure behind the
+ * Delivered / Not delivered cards, so it answers the filters like `totalQty`.
+ *
+ * Lines are grouped by model before the lookup, so a gate pass carrying one
+ * model on two lines cannot count the same delivered pieces twice, and each
+ * model's delivered figure is capped at what the gate pass carries.
+ */
+async function deliveredQtyFor(filter: QueryFilter<GatePass>): Promise<number> {
+  const [row] = await GatePassModel.aggregate<{ deliveredQty: number }>([
+    { $match: filter },
+    { $unwind: '$items' },
+    {
+      $group: {
+        _id: { gatePassId: '$_id', modelKey: '$items.productModelKey' },
+        qty: { $sum: '$items.qty' },
+      },
+    },
+    {
+      $lookup: {
+        from: TripDoLineModel.collection.name,
+        let: { gatePassId: '$_id.gatePassId', modelKey: '$_id.modelKey' },
+        pipeline: [
+          {
+            $match: {
+              $expr: {
+                $and: [
+                  { $eq: ['$link.gatePassId', '$$gatePassId'] },
+                  { $eq: [LINKED_LINE_KEY, '$$modelKey'] },
+                ],
+              },
+            },
+          },
+          // Order rows' first delivery, less linked returns, plus linked re-sends.
+          { $group: { _id: null, qty: { $sum: DELIVERED_SHARE } } },
+        ],
+        as: 'delivered',
+      },
+    },
+    {
+      $group: {
+        _id: null,
+        deliveredQty: {
+          $sum: {
+            $min: [
+              '$qty',
+              { $max: [0, { $round: [{ $ifNull: [{ $first: '$delivered.qty' }, 0] }, 0] }] },
+            ],
+          },
+        },
+      },
+    },
+  ])
+
+  return row?.deliveredQty ?? 0
+}
+
 export async function listGatePasses(
   query: ListGatePassesQuery,
   viewer: UserDocument,
 ): Promise<ListGatePassesResult> {
-  const filter = buildListFilter(query, viewer)
+  const filter = await buildListFilter(query, viewer)
   const skip = (query.page - 1) * query.limit
 
-  const [records, totals] = await Promise.all([
+  const [records, totals, deliveredQty] = await Promise.all([
     GatePassModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(query.limit),
     totalsFor(filter),
+    deliveredQtyFor(filter),
   ])
 
-  const names = await resolveActorNames(records)
+  const [names, delivery] = await Promise.all([
+    resolveActorNames(records),
+    deliveryByGatePassLine(records.map((record) => record._id)),
+  ])
 
   return {
-    records: records.map((record) => toGatePassRecord(record, names)),
+    records: records.map((record) => {
+      const lines = delivery.get(String(record._id))
+      return {
+        ...toGatePassRecord(record, names),
+        lineDelivery: record.items.map(
+          (item) =>
+            lines?.get(item.productModelKey) ?? {
+              linkedQty: 0,
+              deliveredQty: 0,
+              status: 'Unlinked' as const,
+            },
+        ),
+      }
+    }),
     total: totals.total,
     totalQty: totals.totalQty,
+    deliveredQty,
+    notDeliveredQty: Math.max(0, totals.totalQty - deliveredQty),
   }
 }
 
@@ -254,7 +462,7 @@ export async function exportGatePasses(
   query: GatePassFilterQuery,
   viewer: UserDocument,
 ): Promise<GatePassExport> {
-  const filter = buildListFilter(query, viewer)
+  const filter = await buildListFilter(query, viewer)
   const totals = await totalsFor(filter)
 
   if (totals.total === 0) {
@@ -430,49 +638,47 @@ export async function updateGatePass(
 ): Promise<GatePassRecord> {
   const record = await findRecord(id)
   assertCanEdit(record, actor)
+  /**
+   * A correction may not leave more pieces linked to a model on the Trip DO
+   * sheet than the gate pass now carries. Refused rather than unlinked,
+   * because which challan should lose its Trip DO is not arithmetic.
+   */
+  await assertGatePassEditKeepsLinks(record._id, input.items)
 
   applyFields(record, input)
   returnForReverification(record, actor)
   record.updatedBy = actor._id
   await record.save()
+  // Linked rows show this gate pass's Trip DO, CSD and unit.
+  await refreshGatePassLinkCopies(record)
+  // A corrected quantity moves how much of it the bills cover.
+  await refreshBillingStatus({ gatePassIds: [record._id] })
 
   return serialize(record)
 }
 
 /**
- * Possible duplicates for a candidate gate pass.
+ * Possible duplicates for a candidate gate pass: another record with the same
+ * Trip DO.
  *
- * Two probes, because there are two ways the same trip shows up twice. The
- * delivery order number is the strong signal — the same DO recorded twice is
- * almost always a mistake. The weaker signal is the same vehicle carrying the
- * same model on the same day, which happens legitimately on a split delivery
- * and so is offered as a question, never enforced.
+ * The same DO recorded twice is almost always a mistake, so it is the one
+ * thing asked about. There used to be a second probe — the same vehicle
+ * carrying the same model on the same day — and it was removed: one lorry
+ * routinely takes the same model out on several Trip DOs in a day, so it asked
+ * on ordinary gate passes and taught operators to dismiss the dialog unread,
+ * which is how the one real duplicate gets through.
  *
- * Nothing here is a unique index. The business has not confirmed that any of
- * these combinations is globally unique, and a constraint built on that
- * assumption would eventually refuse a real gate pass at the gate.
+ * Nothing here is a unique index. The business has not confirmed a Trip DO is
+ * globally unique, and a constraint built on that assumption would eventually
+ * refuse a real gate pass at the gate.
  */
 export async function findDuplicates(
   query: DuplicateQuery,
   viewer: UserDocument,
 ): Promise<DuplicateCandidate[]> {
-  const clauses: QueryFilter<GatePass>[] = []
+  const tripDoKey = comparisonKey(query.tripDo)
 
-  if (query.tripDo) {
-    clauses.push({ tripDoKey: comparisonKey(query.tripDo) })
-  }
-
-  if (query.tripDate && query.vehicleNo && query.model) {
-    clauses.push({
-      tripDate: startOfUtcDay(query.tripDate),
-      vehicleNoKey: comparisonKey(query.vehicleNo),
-      // Any line carrying the model counts: a split delivery repeats the same
-      // product across two gate passes, which is exactly what this asks about.
-      'items.productModelKey': comparisonKey(query.model),
-    })
-  }
-
-  if (clauses.length === 0) {
+  if (!tripDoKey) {
     return []
   }
 
@@ -480,7 +686,7 @@ export async function findDuplicates(
   // be a mistake is deleted rather than withdrawn, so anything still in the
   // collection is something the operator should be asked about.
   const filter: QueryFilter<GatePass> = {
-    $and: [{ $or: clauses }],
+    $and: [{ tripDoKey }],
   }
 
   if (query.excludeId) {
@@ -496,11 +702,7 @@ export async function findDuplicates(
   // with a truck waiting at the gate.
   const matches = await GatePassModel.find(filter).sort({ createdAt: -1 }).limit(5)
 
-  const tripDoKey = query.tripDo ? comparisonKey(query.tripDo) : ''
-
-  return matches.map((match) =>
-    toDuplicateCandidate(match, match.tripDoKey === tripDoKey ? 'tripDo' : 'trip'),
-  )
+  return matches.map((match) => toDuplicateCandidate(match, 'tripDo'))
 }
 
 /** Where each suggestible field actually lives in a document. */
@@ -595,16 +797,7 @@ export async function submitGatePass(
 
   if (!input.acknowledgeDuplicate) {
     const duplicates = await findDuplicates(
-      {
-        tripDo: record.tripDo,
-        tripDate: record.tripDate.toISOString().slice(0, 10),
-        vehicleNo: record.vehicleNo,
-        // The first line stands for the load. Probing every model would find
-        // more matches and ask a longer question; the operator is deciding
-        // "is this the same delivery", and one product answers that.
-        model: record.items[0]?.productModel ?? '',
-        excludeId: String(record._id),
-      },
+      { tripDo: record.tripDo, excludeId: String(record._id) },
       actor,
     )
 
@@ -769,6 +962,8 @@ export async function readGatePassDocument(
 export async function removeGatePass(id: string, actor: UserDocument): Promise<{ id: string }> {
   const record = await findRecord(id)
   assertCanDelete(record, actor)
+  // Challan rows on the Trip DO sheet would be left pointing at nothing.
+  await assertGatePassNotLinked(record._id)
 
   const key = record.document?.key ?? null
   await record.deleteOne()

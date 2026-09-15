@@ -1,12 +1,12 @@
 import cookieParser from 'cookie-parser'
 import cors from 'cors'
 import express from 'express'
-import rateLimit from 'express-rate-limit'
 import helmet from 'helmet'
 import morgan from 'morgan'
 import { config } from './config/index'
 import { globalErrorHandler } from './middlewares/global-error-handler'
 import { notFound } from './middlewares/not-found'
+import { accountLimiter, addressLimiter } from './middlewares/rate-limit'
 import { apiRouter } from './routes/index'
 
 const app = express()
@@ -73,19 +73,8 @@ if (config.isDevelopment) {
   app.use(morgan('dev'))
 }
 
-const apiLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 300,
-  standardHeaders: 'draft-7',
-  legacyHeaders: false,
-  message: {
-    success: false,
-    message: 'Too many requests. Please try again later.',
-    errorSources: [{ path: '', message: 'Rate limit exceeded.' }],
-  },
-})
-
-app.use('/api', apiLimiter)
+// Per account, with a per-address ceiling beneath it — see middlewares/rate-limit.ts.
+app.use('/api', addressLimiter, accountLimiter)
 app.use('/api/v1', apiRouter)
 
 // Pathless: Express 5 rejects a bare '*' path.

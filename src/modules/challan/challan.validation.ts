@@ -370,6 +370,25 @@ const challanFilterFields = {
    * than a pass over the items array. On M0 that is the whole difference.
    */
   amount: z.enum(["all", "unpriced", "partial"]).default("all"),
+  /**
+   * How much of the challan has left the gate, in the sense somebody loading
+   * lorries cares about.
+   *
+   * `pending` is the working list — filed, and on no trip yet. `partial` is
+   * the quieter one: a challan split across trips whose remainder nobody has
+   * come back for, which looks dispatched at a glance and is not. `sent` and
+   * `delivered` are there to be read rather than worked through. `returned` is
+   * goods that came back off a lorry and have not gone out again.
+   *
+   * All of them read fields the Delivery module writes onto the challan — an
+   * indexed lookup rather than a pass over every trip in the collection, which
+   * is the only reason a challan carries those fields at all.
+   */
+  dispatch: z
+    .enum(["all", "pending", "partial", "sent", "delivered", "returned"])
+    .default("all"),
+  /** Whether the challan's Trip DO sheet rows are on a bill — see the Bill module. */
+  bill: z.enum(["all", "unbilled", "partial", "billed"]).default("all"),
   customer: z.string().trim().max(200).default(""),
   product: z.string().trim().max(200).default(""),
   model: z.string().trim().max(120).default(""),

@@ -50,6 +50,20 @@ const vehicleSchema = new Schema(
 
     /** Optional: plenty of fleets record a plate and nothing else. */
     brand: { type: String, default: '', trim: true, maxlength: 80 },
+
+    /**
+     * A picture of the vehicle. Public bucket, normalised to a 512px square,
+     * exactly like a vendor mark and a driver portrait — see the note on the
+     * vendor model for why photos and compliance documents are stored
+     * differently.
+     *
+     * It carries nothing private. A plate is painted on the outside of a lorry
+     * and is already the record's own identifier, which is what separates this
+     * from a registration certificate: that carries an owner's name and address
+     * and is streamed through the authenticated API instead.
+     */
+    photoUrl: { type: String, default: null },
+    photoKey: { type: String, default: null },
     /**
      * The stored path is `vehicleModel`, not `model`: `model` collides with
      * Mongoose's own `Document.model()` and produces an unreadable type error.

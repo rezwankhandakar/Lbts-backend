@@ -92,6 +92,24 @@ const envSchema = z.object({
     blank,
     z.string().trim().min(1).default('vendor-documents'),
   ),
+  /**
+   * Key prefix for the receiver's signed challan copy — the scan that comes
+   * back off a delivery and completes it.
+   *
+   * Private, and its own prefix for the same reason gate pass scans have one:
+   * a signed challan carries the customer's address, their phone number and
+   * somebody's signature, so nothing here is ever served from
+   * `R2_PUBLIC_BASE_URL`. The API streams it at
+   * GET /api/v1/deliveries/:id/challans/:challanId/received-copy behind the
+   * module's own auth and role checks. Separate from the challan prefix so the
+   * bucket can keep the office's own PDF and the signed copy on different
+   * lifecycle rules — they are produced months apart and kept for different
+   * reasons.
+   */
+  R2_DELIVERY_PREFIX: z.preprocess(
+    blank,
+    z.string().trim().min(1).default('delivery-receipts'),
+  ),
 
   /**
    * Gemini, which helps choose between location candidates this server has
@@ -168,6 +186,7 @@ const r2 =
         challanKeyPrefix: trimSlashes(parsed.data.R2_CHALLAN_PREFIX),
         vendorKeyPrefix: trimSlashes(parsed.data.R2_VENDOR_PREFIX),
         vendorDocumentKeyPrefix: trimSlashes(parsed.data.R2_VENDOR_DOCUMENT_PREFIX),
+        deliveryKeyPrefix: trimSlashes(parsed.data.R2_DELIVERY_PREFIX),
       }
     : null
 

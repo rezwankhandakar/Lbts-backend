@@ -6,13 +6,12 @@ import { VehicleModel } from './vehicle.model'
 import { VendorDocumentModel } from './vendor-document.model'
 import { VendorModel } from './vendor.model'
 import { assertCanReadVendor, vendorFilterFor } from './vendor.access'
-import { listActivity } from './vendor.activity'
 import { MAX_SUMMARY_ALERTS } from './vendor.constants'
 import type { DriverStatus, VehicleStatus, VendorStatus } from './vendor.constants'
 import { expiryWindow, findVendorOr404 } from './vendor.lookups'
 import { listAssignments } from './assignment.service'
 import { listDocuments } from './document.service'
-import type { ActivityRecord, AssignmentRecord, DocumentRecord } from './vendor.serializer'
+import type { AssignmentRecord, DocumentRecord } from './vendor.serializer'
 import {
   listAssignmentsQuerySchema,
   listDocumentsQuerySchema,
@@ -85,7 +84,6 @@ export interface VendorSummary {
   activeAssignments: number
   recentAssignments: AssignmentRecord[]
   expiringDocuments: DocumentRecord[]
-  recentActivity: ActivityRecord[]
 }
 
 /** Summed from the grouped rows, so it can never disagree with the parts. */
@@ -177,19 +175,19 @@ export async function getVendorSummary(
   }
 
   /**
-   * The three lists underneath the numbers, fetched in parallel with each other
+   * The two lists underneath the numbers, fetched in parallel with each other
    * and reusing the list services rather than growing a second set of queries —
    * so a summary can never describe a set of records the tabs would disagree
-   * with.
+   * with. Recent activity used to be a third; it left the overview with the
+   * Activity tab, and is still recorded for the Activity module to read.
    */
-  const [expiring, recent, activity] = await Promise.all([
+  const [expiring, recent] = await Promise.all([
     listDocuments(
       vendorId,
       listDocumentsQuerySchema.parse({ limit: '5', status: 'Expiring Soon' }),
       viewer,
     ),
     listAssignments(vendorId, listAssignmentsQuerySchema.parse({ limit: '5' }), viewer),
-    listActivity(vendorId, 8),
   ])
 
   const alerts = buildAlerts(vehicles, drivers, documents)
@@ -203,7 +201,6 @@ export async function getVendorSummary(
     activeAssignments,
     recentAssignments: recent.records,
     expiringDocuments: expiring.records,
-    recentActivity: activity,
   }
 }
 

@@ -6,7 +6,12 @@ import {
   LOCATION_TYPES,
   PENDING_LOCATION_STATUS,
 } from "../location/location.constants";
+import {
+  DISPATCH_STATUSES,
+  INITIAL_DISPATCH_STATUS,
+} from "../delivery/delivery.constants";
 import { RATE_KINDS } from "../product-rate/product-rate.constants";
+import { BILLING_STATUSES } from "../bill/bill.constants";
 import {
   CHALLAN_STATUSES,
   CHARGE_STATUSES,
@@ -309,6 +314,49 @@ const challanSchema = new Schema(
       index: true,
     },
 
+    // --- Dispatch ----------------------------------------------------------
+    /**
+     * How much of this challan has gone out on a trip, and how much.
+     *
+     * Written by the **Delivery** module and by nothing else — see
+     * `refreshChallanDispatch` — which is why the vocabulary lives there, the
+     * way `locationStatus`'s does in the Location module. A challan knows what
+     * it ordered; only a trip knows what left the gate.
+     *
+     * Stored rather than derived for the reason `locationStatus` and
+     * `chargeStatus` are: "which challans are still waiting to go out" is a
+     * question somebody sits down to answer, and answering it by opening every
+     * trip on every page of the list is the unindexed work M0 cannot afford.
+     */
+    dispatchStatus: {
+      type: String,
+      enum: DISPATCH_STATUSES,
+      default: INITIAL_DISPATCH_STATUS,
+      index: true,
+    },
+    /** Pieces across every trip carrying it, so a row can read "3 of 4 sent". */
+    dispatchedQty: { type: Number, default: 0, min: 0 },
+    /**
+     * Pieces that went out and came back, across every trip, and how many of
+     * those a later trip has taken out again — see `returnFlowFor`. Written
+     * beside `dispatchStatus` by the same refresh. The difference is what is
+     * sitting at the depot, which a full return would otherwise hide behind a
+     * `Pending` that looks exactly like a challan nobody ever loaded.
+     */
+    returnedQty: { type: Number, default: 0, min: 0 },
+    resentQty: { type: Number, default: 0, min: 0 },
+
+    // --- Billing -----------------------------------------------------------
+    /**
+     * Whether this challan's Trip DO sheet rows are on a bill — every one,
+     * some, or none — and which bills. Written by the **Bill** module and by
+     * nothing else (`refreshBillingStatus`), stored for the reason
+     * `dispatchStatus` is: "what has not been billed" is a list somebody works
+     * through, and it has to be an indexed lookup.
+     */
+    billStatus: { type: String, enum: BILLING_STATUSES, default: "Unbilled" },
+    billNumbers: { type: [String], default: [] },
+
     // --- Generated document ------------------------------------------------
     document: { type: documentSchema, required: true },
 
@@ -424,6 +472,21 @@ challanSchema.index({ locationStatus: 1, createdAt: -1 });
  * serves the filter and the sort together.
  */
 challanSchema.index({ chargeStatus: 1, createdAt: -1 });
+/**
+ * "What is still waiting to go out?" — the third backlog, and the reason
+ * `dispatchStatus` is stored at all. Compound with `createdAt` for the reason
+ * the other two are: the answer is always newest first, so one index serves
+ * the filter and the sort together.
+ */
+challanSchema.index({ dispatchStatus: 1, createdAt: -1 });
+/**
+ * "What came back and is still on the shelf?" The index narrows to challans
+ * with any return at all — few, by nature — and the comparison with
+ * `resentQty` runs over only those.
+ */
+challanSchema.index({ returnedQty: 1, createdAt: -1 });
+/** "What has not been billed?" — newest first, like every backlog. */
+challanSchema.index({ billStatus: 1, createdAt: -1 });
 /**
  * The reverse lookup, used when a master row is about to be removed: does
  * anything still point at it? Sparse, because most of the interesting

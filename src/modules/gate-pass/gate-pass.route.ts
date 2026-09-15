@@ -12,6 +12,7 @@ import {
 } from './gate-pass.constants'
 import {
   deleteGatePass,
+  getColumnValues,
   getDocument,
   getDuplicates,
   getExport,
@@ -29,6 +30,7 @@ import {
   createGatePassSchema,
   duplicateQuerySchema,
   exportGatePassesQuerySchema,
+  gatePassColumnValuesQuerySchema,
   gatePassIdParamSchema,
   listGatePassesQuerySchema,
   reviewGatePassSchema,
@@ -68,6 +70,12 @@ router.get('/duplicates', validateRequest({ query: duplicateQuerySchema }), getD
  * same read roles and the same visibility rules as the records themselves.
  */
 router.get('/suggestions', validateRequest({ query: suggestionQuerySchema }), getSuggestions)
+/** The records sheet's column filter dropdowns. The same read roles and visibility as the list. */
+router.get(
+  '/column-values',
+  validateRequest({ query: gatePassColumnValuesQuerySchema }),
+  getColumnValues,
+)
 
 /**
  * The spreadsheet. Its own budget, and a small one: an export reads every

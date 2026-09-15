@@ -8,6 +8,8 @@ import type {
 } from "../location/location.constants";
 import type { Rate } from "../product-rate/product-rate.constants";
 import { totalOf } from "../product-rate/product-rate.pricing";
+import type { DispatchStatus } from "../delivery/delivery.constants";
+import type { BillingStatus } from "../bill/bill.constants";
 import type { ChallanBatchStatus, ChallanStatus } from "./challan.constants";
 import type { ChallanBatchDocument } from "./challan-batch.model";
 import type { ChallanDocument } from "./challan.model";
@@ -127,6 +129,23 @@ export interface ChallanRecord {
   resolvedLocation: ResolvedLocationRef | null;
   /** `Verified` exactly when `resolvedLocation` is set. */
   locationStatus: LocationStatus;
+
+  /**
+   * How much of this challan has left the gate, written by the Delivery
+   * module. `Pending` on a challan nothing carries — which is every challan
+   * until a trip takes it.
+   */
+  dispatchStatus: DispatchStatus;
+  /** Pieces across every trip carrying it, so a row can read "3 of 4 sent". */
+  dispatchedQty: number;
+  /** Pieces that came back off a trip, and how many of those went out again. */
+  returnedQty: number;
+  resentQty: number;
+
+  /** Whether its Trip DO sheet rows are on a bill, written by the Bill module. */
+  billStatus: BillingStatus;
+  /** The bills carrying them, in number order. */
+  billNumbers: string[];
 
   /** One line per product on the challan; always at least one. */
   items: ChallanItem[];
@@ -374,6 +393,12 @@ export function toChallanRecord(
 
     resolvedLocation: toResolvedLocation(challan, actorNames),
     locationStatus: (challan.locationStatus as LocationStatus) ?? "Pending",
+    dispatchStatus: (challan.dispatchStatus as DispatchStatus) ?? "Pending",
+    dispatchedQty: challan.dispatchedQty ?? 0,
+    returnedQty: challan.returnedQty ?? 0,
+    resentQty: challan.resentQty ?? 0,
+    billStatus: (challan.billStatus as BillingStatus) ?? "Unbilled",
+    billNumbers: [...(challan.billNumbers ?? [])],
 
     items,
     totalQty: totalQtyOf(challan),

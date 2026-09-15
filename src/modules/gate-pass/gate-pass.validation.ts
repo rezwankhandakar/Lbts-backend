@@ -1,7 +1,8 @@
 import * as z from 'zod'
+import { columnFiltersParam } from '../../utils/column-filters'
+import { GATE_PASS_COLUMN_IDS } from './gate-pass.columns'
 import {
   GATE_PASS_REFERENCE_TYPES,
-  GATE_PASS_STATUSES,
   MAX_GATE_PASS_ITEMS,
 } from './gate-pass.constants'
 
@@ -177,11 +178,11 @@ export type ReviewGatePassInput = z.infer<typeof reviewGatePassSchema>
  */
 const gatePassFilterFields = {
   search: z.string().trim().max(120).default(''),
-  status: z.enum(['all', ...GATE_PASS_STATUSES]).default('all'),
-  csd: z.string().trim().max(24).default(''),
-  unit: z.string().trim().max(24).default(''),
-  product: z.string().trim().max(160).default(''),
+  /** The column dropdowns' ticked values — see `gate-pass.columns.ts`. */
+  columns: columnFiltersParam(GATE_PASS_COLUMN_IDS),
   referenceType: z.enum(['all', ...GATE_PASS_REFERENCE_TYPES]).default('all'),
+  /** Whether what it carried is on a bill — see the Bill module. */
+  bill: z.enum(['all', 'unbilled', 'partial', 'billed']).default('all'),
   /** Matches whichever of zone or po the record actually carries. */
   reference: z.string().trim().max(60).default(''),
   /** An operator's own records; any other id is an Admin or Manager view. */
@@ -225,15 +226,23 @@ export const exportGatePassesQuerySchema = z.object(gatePassFilterFields).superR
 export type GatePassFilterQuery = z.infer<typeof exportGatePassesQuerySchema>
 
 /**
+ * The values one column's dropdown offers, under every other filter in use —
+ * the column's own ticks aside, or unticking one would make it vanish.
+ */
+export const gatePassColumnValuesQuerySchema = z
+  .object({ column: z.enum(GATE_PASS_COLUMN_IDS), ...gatePassFilterFields })
+  .superRefine(checkDateOrder)
+
+export type GatePassColumnValuesQuery = z.infer<typeof gatePassColumnValuesQuerySchema>
+
+/**
  * The duplicate probe the New Gate Pass workspace runs before it submits. It
  * takes the candidate values rather than a record id, because at that point
  * there may be nothing saved yet.
  */
 export const duplicateQuerySchema = z.object({
+  /** The only thing a duplicate is matched on — see `findDuplicates`. */
   tripDo: z.string().trim().max(60).default(''),
-  tripDate: z.string().trim().regex(DATE_ONLY, 'Invalid date.').or(z.literal('')).default(''),
-  vehicleNo: z.string().trim().max(60).default(''),
-  model: z.string().trim().max(80).default(''),
   /** The record being edited, which must never match itself. */
   excludeId: z.union([objectId, z.literal('')]).default(''),
 })

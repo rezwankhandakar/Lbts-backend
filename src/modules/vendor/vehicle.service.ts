@@ -22,7 +22,7 @@ import {
 } from './vendor.lookups'
 import { toVehicleRecord } from './vendor.serializer'
 import type { VehicleRecord } from './vendor.serializer'
-import { discardVendorObject } from './vendor.storage'
+import { discardVendorObject, uploadVendorPhoto } from './vendor.storage'
 import type {
   CreateVehicleInput,
   ListVehiclesQuery,
@@ -300,6 +300,69 @@ export async function changeVehicleStatus(
   return serialize(vehicle)
 }
 
+/**
+ * A vehicle's own picture.
+ *
+ * Written in the same order every module here writes a stored object in:
+ * upload, then the reference, then discard the one it replaced. The worst
+ * outcome of a failure is an orphan in the bucket, never a vehicle pointing at
+ * an image that is no longer there — and if the save fails, the object just
+ * uploaded is discarded rather than left behind.
+ *
+ * It does not touch `updatedBy`'s meaning for anything else: a picture is a
+ * change to the record like any other, and the fleet table shows who last
+ * touched it.
+ */
+export async function setVehiclePhoto(
+  id: string,
+  buffer: Buffer,
+  actor: UserDocument,
+): Promise<VehicleRecord> {
+  const vehicle = await findVehicleOr404(id)
+  assertCanManageVendor(String(vehicle.vendorId), actor)
+
+  const previousKey = vehicle.photoKey
+  const uploaded = await uploadVendorPhoto(buffer, 'vehicles')
+
+  vehicle.photoUrl = uploaded.url
+  vehicle.photoKey = uploaded.key
+  vehicle.updatedBy = actor._id
+
+  try {
+    await vehicle.save()
+  } catch (error) {
+    await discardVendorObject(uploaded.key)
+    throw error
+  }
+
+  await discardVendorObject(previousKey)
+
+  return serialize(vehicle)
+}
+
+/** Clearing the reference first, then the object. The reverse of setting it. */
+export async function clearVehiclePhoto(
+  id: string,
+  actor: UserDocument,
+): Promise<VehicleRecord> {
+  const vehicle = await findVehicleOr404(id)
+  assertCanManageVendor(String(vehicle.vendorId), actor)
+
+  if (!vehicle.photoUrl && !vehicle.photoKey) {
+    throw new AppError(409, 'There is no vehicle photo to remove.')
+  }
+
+  const previousKey = vehicle.photoKey
+  vehicle.photoUrl = null
+  vehicle.photoKey = null
+  vehicle.updatedBy = actor._id
+  await vehicle.save()
+
+  await discardVendorObject(previousKey)
+
+  return serialize(vehicle)
+}
+
 export interface VehicleRemoval {
   id: string
   assignments: number
@@ -344,6 +407,8 @@ export async function removeVehicle(
   for (const document of documents) {
     await discardVendorObject(document.attachment?.key)
   }
+
+  await discardVendorObject(vehicle.photoKey)
 
   await recordActivity({
     vendorId: vehicle.vendorId,

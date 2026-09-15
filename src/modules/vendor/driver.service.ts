@@ -5,6 +5,7 @@ import { AssignmentModel } from './assignment.model'
 import { DriverModel } from './driver.model'
 import type { Driver, DriverDocument } from './driver.model'
 import { VendorDocumentModel } from './vendor-document.model'
+import type { VendorDocument } from './vendor.model'
 import { assertCanManageVendor, assertCanReadVendor } from './vendor.access'
 import { recordActivity } from './vendor.activity'
 import {
@@ -188,6 +189,66 @@ async function assertMobileFree(
 }
 
 /**
+ * One person recorded twice under the same vendor, caught by what identifies
+ * them rather than by what they are called.
+ *
+ * A national ID and a driving licence each belong to exactly one person, so a
+ * second driver carrying either under the same vendor is a duplicate record —
+ * and a duplicate driver is how a trip gets filed against the copy nobody keeps
+ * up to date. Scoped to the vendor for the same reason the mobile rule is: one
+ * person driving for two firms is legitimate, and refusing the second firm's
+ * record would be this system telling the business something untrue.
+ *
+ * Only the fields actually being written are checked, so correcting a driver's
+ * address is never refused because of a duplicate somebody created before this
+ * rule existed. Blank values are never compared — an empty NID is not an
+ * identity two drivers can share.
+ */
+async function assertIdentityFree(
+  vendorId: string,
+  identity: { nidNumber?: string; licenseNumber?: string },
+  exceptId?: string,
+): Promise<void> {
+  const nidKey = identity.nidNumber ? registrationKey(identity.nidNumber) : ''
+  const licenceKey = identity.licenseNumber ? registrationKey(identity.licenseNumber) : ''
+
+  if (!nidKey && !licenceKey) {
+    return
+  }
+
+  const clauses: QueryFilter<Driver>[] = []
+  if (nidKey) {
+    clauses.push({ nidKey })
+  }
+  if (licenceKey) {
+    // The licence carries no stored key, so the candidates are this vendor's
+    // licensed drivers — tens of rows — and the comparison happens below.
+    clauses.push({ licenseNumber: { $ne: '' } })
+  }
+
+  const candidates = await DriverModel.find({
+    vendorId,
+    ...(exceptId ? { _id: { $ne: exceptId } } : {}),
+    $or: clauses,
+  }).select('driverCode name nidKey licenseNumber')
+
+  for (const candidate of candidates) {
+    if (nidKey && candidate.nidKey === nidKey) {
+      throw new AppError(
+        409,
+        `${candidate.name} (${candidate.driverCode}) is already recorded with that NID for this vendor.`,
+      )
+    }
+    if (licenceKey && registrationKey(candidate.licenseNumber) === licenceKey) {
+      throw new AppError(
+        409,
+        `${candidate.name} (${candidate.driverCode}) is already recorded with that licence number for this vendor.`,
+      )
+    }
+  }
+}
+
+/**
  * Keeps the driver's licence fields and the `Driving License` document row in
  * step, in the one direction that is safe to automate.
  *
@@ -251,7 +312,29 @@ export async function createDriver(
   assertCanManageVendor(vendorId, actor)
 
   const vendor = await findVendorOr404(vendorId)
+  return addDriverToVendor(vendor, input, actor)
+}
 
+/**
+ * Writing a new driver under a vendor, with every rule a driver is held to —
+ * and **no permission check**, which is the caller's job and the whole reason
+ * this is a separate function.
+ *
+ * Two callers, with two different permission stories. `createDriver` above is
+ * the fleet master, where the rule is "Admin and Manager manage vendors". The
+ * Delivery module is the other: an operator building a trip meets a driver the
+ * master does not know yet, and sending them to another page to ask a manager
+ * would stop the trip. That caller checks its own role set and that the vendor
+ * is working before it gets here. What neither caller can skip is everything
+ * below — the name, the mobile, the NID and licence duplicates, the licence
+ * document and the activity entry — so a driver added from a trip is exactly
+ * the record a driver added from the fleet tab would have been.
+ */
+export async function addDriverToVendor(
+  vendor: VendorDocument,
+  input: CreateDriverInput,
+  actor: UserDocument,
+): Promise<DriverDetail> {
   const key = nameKey(input.name)
   if (!key) {
     throw new AppError(400, 'That driver name has no letters or digits in it.')
@@ -259,6 +342,10 @@ export async function createDriver(
 
   const mobileKey = normalizeMobile(input.mobile)
   await assertMobileFree(String(vendor._id), mobileKey)
+  await assertIdentityFree(String(vendor._id), {
+    nidNumber: input.nidNumber,
+    licenseNumber: input.licenseNumber,
+  })
 
   const driver = await DriverModel.create({
     driverCode: await allocateDriverCode(),
@@ -317,6 +404,12 @@ export async function updateDriver(
     driver.mobile = input.mobile
     driver.mobileKey = mobileKey
   }
+
+  await assertIdentityFree(
+    String(driver.vendorId),
+    { nidNumber: input.nidNumber, licenseNumber: input.licenseNumber },
+    String(driver._id),
+  )
 
   if (input.nidNumber !== undefined) {
     driver.nidNumber = input.nidNumber
@@ -415,6 +508,20 @@ export async function setDriverPhoto(
   const driver = await findDriverOr404(id)
   assertCanManageVendor(String(driver.vendorId), actor)
 
+  return applyDriverPhoto(driver, buffer, actor)
+}
+
+/**
+ * Replacing a driver's photo, with the storage ordering every photo in the
+ * system follows — upload, write the reference, then delete the old object —
+ * and no permission check. The same split as `addDriverToVendor`: the fleet
+ * master and the Delivery module each decide who may, and neither may skip how.
+ */
+export async function applyDriverPhoto(
+  driver: DriverDocument,
+  buffer: Buffer,
+  actor: UserDocument,
+): Promise<DriverDetail> {
   const previousKey = driver.photoKey
   const uploaded = await uploadVendorPhoto(buffer, 'drivers')
 

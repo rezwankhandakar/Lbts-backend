@@ -163,6 +163,8 @@ export interface VehicleRecord {
   brand: string
   /** Stored as `vehicleModel`; `model` collides with Mongoose's own method. */
   model: string
+  /** Public bucket, so a fleet table can render it straight from an `src`. */
+  photoUrl: string | null
   ownershipType: VehicleOwnershipType
   status: VehicleStatus
   statusNote: string | null
@@ -203,6 +205,7 @@ export function toVehicleRecord(
     registrationNo: vehicle.registrationNo,
     brand: vehicle.brand,
     model: vehicle.vehicleModel,
+    photoUrl: vehicle.photoUrl ?? null,
     ownershipType: vehicle.ownershipType as VehicleOwnershipType,
     status: vehicle.status as VehicleStatus,
     statusNote: vehicle.statusNote ?? null,

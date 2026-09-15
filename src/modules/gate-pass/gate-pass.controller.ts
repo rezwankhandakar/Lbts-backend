@@ -10,6 +10,7 @@ import {
   findDuplicates,
   getGatePass,
   getGatePassStats,
+  listGatePassColumnValues,
   listGatePasses,
   readGatePassDocument,
   removeGatePass,
@@ -23,6 +24,7 @@ import { buildGatePassWorkbook, gatePassExportFilename } from './gate-pass.expor
 import type {
   CreateGatePassInput,
   DuplicateQuery,
+  GatePassColumnValuesQuery,
   GatePassFilterQuery,
   ListGatePassesQuery,
   ReviewGatePassInput,
@@ -54,7 +56,10 @@ function idFrom(req: Request): string {
 
 export async function getGatePasses(req: Request, res: Response): Promise<void> {
   const query = req.validated?.query as ListGatePassesQuery
-  const { records, total, totalQty } = await listGatePasses(query, actorFrom(req))
+  const { records, total, totalQty, deliveredQty, notDeliveredQty } = await listGatePasses(
+    query,
+    actorFrom(req),
+  )
 
   sendResponse(res, {
     statusCode: 200,
@@ -68,7 +73,19 @@ export async function getGatePasses(req: Request, res: Response): Promise<void> 
       // Summed over every matching record rather than this page, because the
       // question it answers is about the filters and not about the scroll.
       totalQty,
+      deliveredQty,
+      notDeliveredQty,
     },
+  })
+}
+
+export async function getColumnValues(req: Request, res: Response): Promise<void> {
+  const query = req.validated?.query as GatePassColumnValuesQuery
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Column values retrieved',
+    data: await listGatePassColumnValues(query, actorFrom(req)),
   })
 }
 

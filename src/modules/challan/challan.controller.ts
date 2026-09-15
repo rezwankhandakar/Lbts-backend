@@ -72,6 +72,9 @@ export async function getChallans(req: Request, res: Response): Promise<void> {
     partialAmount,
     locationPending,
     locationReview,
+    notDispatched,
+    partlyDispatched,
+    returnedAtDepot,
   } = await listChallans(query);
 
   sendResponse(res, {
@@ -96,16 +99,19 @@ export async function getChallans(req: Request, res: Response): Promise<void> {
       totalAmount,
       unpricedChallans,
       /**
-       * The three backlogs the toolbar draws as chips: challans nobody has
-       * charged, challans nobody has located, and locations the machine
-       * inferred that nobody has read. Counted over the same matching set as
-       * the totals beside them, so every figure in that row answers the same
-       * question.
+       * The backlogs the toolbar draws as chips: challans nobody has charged,
+       * challans nobody has located, locations the machine inferred that
+       * nobody has read, and challans that have not left the gate — in full or
+       * at all. Counted over the same matching set as the totals beside them,
+       * so every figure in that row answers the same question.
        */
       blankAmount,
       partialAmount,
       locationPending,
       locationReview,
+      notDispatched,
+      partlyDispatched,
+      returnedAtDepot,
     },
   });
 }

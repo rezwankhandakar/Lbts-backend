@@ -8,18 +8,26 @@ import {
   registerConnectionEvents,
 } from './config/db'
 import { ensureDnsResolvers } from './config/dns'
+import { backfillBillingStatus } from './modules/bill/bill.status'
 import {
   backfillChallanChargeStatus,
   backfillChallanLocations,
   foldLegacyChallanProducts,
   priceUnpricedChallanItems,
 } from './modules/challan/challan.migration'
+import {
+  backfillChallanDispatch,
+  migrateTripStatuses,
+  purgeLegacyDeliveries,
+  syncDeliveryIndexes,
+} from './modules/delivery/delivery.migration'
 import { seedLocationMaster } from './modules/location/location.seed'
 import {
   foldLegacyGatePassProducts,
   purgeCancelledGatePasses,
 } from './modules/gate-pass/gate-pass.migration'
 import { seedProductRates } from './modules/product-rate/product-rate.seed'
+import { backfillTripDoLedger } from './modules/trip-do/trip-do.sync'
 import { normalizeLegacyUserRecords } from './modules/user/user.migration'
 
 let server: Server | undefined
@@ -85,12 +93,33 @@ function start(): void {
     // where its quantity drops out of every total the list reports.
     void foldLegacyChallanProducts()
     /**
+     * The `deliveries` collection was used once by an earlier delivery design
+     * whose documents this module cannot read — and one of them made the trips
+     * list answer 500 for the whole page. Its *indexes* outlived it too,
+     * including a unique one on a field no trip here has, which refused every
+     * delivery after the first; `syncDeliveryIndexes` is what clears those.
+     */
+    const dispatchReady = purgeLegacyDeliveries()
+      .then(() => syncDeliveryIndexes())
+      /**
+       * Then the trips written while a status was something an operator
+       * pressed. They become `Open`, because a trip is `Completed` when every
+       * challan on it has been signed for and no historical trip has a signed
+       * copy. Before the backfill below, which reads those statuses.
+       */
+      .then(() => migrateTripStatuses())
+      /**
+       * And then what the trips say about the challans they carried. Last,
+       * because it reads the trips this pass has just cleaned up.
+       */
+      .then(() => backfillChallanDispatch())
+    /**
      * The district/thana master list, and then the challans filed before it
      * existed. Sequential on purpose: the backfill matches against the
      * collection the seeder fills, so starting both at once would have it
      * match against an empty one.
      */
-    void seedLocationMaster().then(() => backfillChallanLocations())
+    const locationsReady = seedLocationMaster().then(() => backfillChallanLocations())
     /**
      * The rate card, and then the challans whose lines it could not price when
      * they were filed. Sequential for the same reason the location pair is:
@@ -101,7 +130,7 @@ function start(): void {
      * filed before their product was on the card, and the ones filed before
      * the matcher could see the card's model inside a longer challan code.
      */
-    void seedProductRates()
+    const ratesReady = seedProductRates()
       .then(() => priceUnpricedChallanItems())
       /**
        * And then classify what is left. Last on purpose: pricing changes which
@@ -109,6 +138,18 @@ function start(): void {
        * a status the very next step invalidates.
        */
       .then(() => backfillChallanChargeStatus())
+    /**
+     * The Trip DO sheet copies a challan's location, its rates and what its
+     * trips did, so it is built after all three chains above have settled.
+     * Every step in them never throws, so waiting on all of them is safe.
+     */
+    void Promise.all([dispatchReady, locationsReady, ratesReady])
+      .then(() => backfillTripDoLedger())
+      /**
+       * And then the billing status on challans and gate passes, which reads
+       * the sheet rows the step before has just rebuilt.
+       */
+      .then(() => backfillBillingStatus())
   })
 
   process.on('SIGTERM', () => shutdown('SIGTERM'))

@@ -1,10 +1,13 @@
 import { Router } from 'express'
 import { administrationRoutes } from '../modules/administration/administration.route'
+import { billRoutes } from '../modules/bill/bill.route'
 import { challanBatchRoutes, challanRoutes } from '../modules/challan/challan.route'
+import { deliveryRoutes } from '../modules/delivery/delivery.route'
 import { gatePassRoutes } from '../modules/gate-pass/gate-pass.route'
 import { locationRoutes } from '../modules/location/location.route'
 import { productRateRoutes } from '../modules/product-rate/product-rate.route'
 import { profileRoutes } from '../modules/profile/profile.route'
+import { tripDoRoutes } from '../modules/trip-do/trip-do.route'
 import { userRoutes } from '../modules/user/user.route'
 import {
   assignmentRoutes,
@@ -69,6 +72,27 @@ const routes: RouteDefinition[] = [
   { path: '/drivers', route: driverRoutes },
   { path: '/vendor-assignments', route: assignmentRoutes },
   { path: '/vendor-documents', route: vendorDocumentRoutes },
+  /**
+   * Trips. A records module that *reads* three others — the vendor fleet for
+   * who drives, Challan for what is carried, and the assignment collection for
+   * who was meant to — and writes into none of them. The one exception is a
+   * driver added from inside a trip, which goes through the Vendor module's own
+   * `addDriverToVendor` so it is exactly the record the fleet tab would make.
+   */
+  { path: '/deliveries', route: deliveryRoutes },
+  /**
+   * The Trip DO sheet: one row per challan product line, plus returns and
+   * re-sends, each linkable to a gate pass line. A view of Challan and
+   * Delivery with two things of its own — how a line is split and which gate
+   * pass each part came out on — so it writes into neither of them.
+   */
+  { path: '/trip-do', route: tripDoRoutes },
+  /**
+   * Bills: a unit's month of Trip DO sheet rows, as the spreadsheet the office
+   * sends. It claims rows on the sheet and writes a billing status onto the
+   * challans and gate passes behind them — and nothing else about either.
+   */
+  { path: '/bills', route: billRoutes },
 ]
 
 const router = Router()

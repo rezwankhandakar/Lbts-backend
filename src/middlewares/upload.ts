@@ -6,6 +6,10 @@ import {
   GATE_PASS_DOCUMENT_MIME_TYPES,
   MAX_GATE_PASS_DOCUMENT_BYTES,
 } from '../modules/gate-pass/gate-pass.constants'
+import {
+  MAX_RECEIVED_COPY_PDF_BYTES,
+  RECEIVED_COPY_MIME_TYPES,
+} from '../modules/delivery/delivery.constants'
 import { DOCUMENT_MIME_TYPES, MAX_DOCUMENT_BYTES } from '../modules/vendor/vendor.constants'
 import { AppError } from '../utils/app-error'
 
@@ -241,6 +245,62 @@ export function uploadVendorDocumentFile(req: Request, res: Response, next: Next
   uploadDocument(req, res, (error: unknown) => {
     if (error instanceof MulterError) {
       next(translateDocument(error))
+      return
+    }
+    if (error) {
+      next(error)
+      return
+    }
+    next()
+  })
+}
+
+/**
+ * The receiver's signed challan copy, coming back off a delivery.
+ *
+ * The same memory-only storage and the same contract as a gate pass scan —
+ * PDF or image, and the parser enforces the PDF ceiling because it can only
+ * enforce one for everything. The tighter image limit is applied in
+ * `delivery.storage.ts`, once the real type is known.
+ *
+ * `fields` allows for the page count the scanner agent reports beside the
+ * file, and nothing else: the return lines, the floor and the carrying charges
+ * are recorded by their own JSON endpoint before this one is reached, because
+ * they are what somebody types and this is what a scanner produces.
+ */
+const uploadReceipt = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_RECEIVED_COPY_PDF_BYTES, files: 1, fields: 4 },
+  fileFilter(_req, file, callback) {
+    if (!(RECEIVED_COPY_MIME_TYPES as readonly string[]).includes(file.mimetype)) {
+      callback(new AppError(400, 'Unsupported document type. Use PDF, JPG, PNG or WEBP.'))
+      return
+    }
+    callback(null, true)
+  },
+}).single('document')
+
+function translateReceipt(error: MulterError): AppError {
+  const megabytes = Math.round(MAX_RECEIVED_COPY_PDF_BYTES / (1024 * 1024))
+
+  switch (error.code) {
+    case 'LIMIT_FILE_SIZE':
+      return new AppError(
+        413,
+        `That signed copy is larger than ${megabytes} MB. Scan it at a lower resolution.`,
+      )
+    case 'LIMIT_FILE_COUNT':
+    case 'LIMIT_UNEXPECTED_FILE':
+      return new AppError(400, 'Send exactly one file, in a field named "document".')
+    default:
+      return new AppError(400, 'The upload could not be read. Please try again.')
+  }
+}
+
+export function uploadReceivedCopyFile(req: Request, res: Response, next: NextFunction): void {
+  uploadReceipt(req, res, (error: unknown) => {
+    if (error instanceof MulterError) {
+      next(translateReceipt(error))
       return
     }
     if (error) {

@@ -9,7 +9,8 @@ import type { DocumentMimeType } from './vendor.constants'
  * Everything this module writes to Cloudflare R2, and there are two kinds of
  * it — which is the one design decision in this file.
  *
- * **Photos** (a vendor's mark, a driver's portrait) go to the public bucket,
+ * **Photos** (a vendor's mark, a driver's portrait, a vehicle's own picture)
+ * go to the public bucket,
  * normalised to a 512px square WEBP, exactly like a profile avatar. They carry
  * no licence number and no address, they are rendered twenty at a time in a
  * table, and routing each one through an authenticated stream would cost twenty
@@ -76,7 +77,7 @@ async function normalizePhoto(buffer: Buffer): Promise<Buffer> {
  */
 export async function uploadVendorPhoto(
   buffer: Buffer,
-  scope: 'vendors' | 'drivers',
+  scope: 'vendors' | 'drivers' | 'vehicles',
 ): Promise<StoredPhoto> {
   // Before decoding anything: an unconfigured deployment should answer 503
   // rather than spend a cold instance's CPU on an image it cannot store.

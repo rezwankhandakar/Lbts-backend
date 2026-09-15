@@ -42,6 +42,11 @@ import {
   readChallanDocument,
   uploadChallanDocument,
 } from "./challan.storage";
+import type { DispatchStatus } from "../delivery/delivery.constants";
+import {
+  assertChallanNotDispatched,
+  assertItemsCoverDispatched,
+} from "../delivery/delivery.dispatch";
 import { REVIEWABLE_LOCATION_SOURCES } from "../location/location.constants";
 import type {
   LocationSource,
@@ -51,6 +56,8 @@ import type {
 import { resolveByMasterId, resolveLocation } from "../location/location.resolver";
 import type { RateKind } from "../product-rate/product-rate.constants";
 import { priceItems } from "../product-rate/product-rate.service";
+import { syncTripDoLedger } from "../trip-do/trip-do.sync";
+import { assertChallanNotBilled } from "../bill/bill.status";
 import { normalizeBanglaText } from "./lib/bangla-text";
 import {
   generateChallanBackPage,
@@ -204,14 +211,41 @@ export interface ListChallansResult {
   /** How many of them carry a line nothing priced, so the total says so. */
   unpricedChallans: number;
   /**
-   * The three backlogs, over the same matching set. What the toolbar chips
-   * count, and each one is the filter that finds them.
+   * The backlogs, over the same matching set. What the toolbar chips count,
+   * and each one is the filter that finds them.
    */
   blankAmount: number;
   partialAmount: number;
   locationPending: number;
   locationReview: number;
+  notDispatched: number;
+  partlyDispatched: number;
+  returnedAtDepot: number;
 }
+
+/**
+ * Came back off a lorry and not out again. `returnedQty > 0` is the indexed
+ * half; the comparison runs over the few challans that survive it.
+ */
+const RETURNED_AT_DEPOT = {
+  returnedQty: { $gt: 0 },
+  $expr: { $gt: ["$returnedQty", { $ifNull: ["$resentQty", 0] }] },
+};
+
+/**
+ * What each dispatch filter asks of the stored status. The filter values read
+ * as an operator speaks — "sent" — and the stored vocabulary is the Delivery
+ * module's, so the mapping is written down once here rather than inferred.
+ */
+const DISPATCH_FILTERS: Record<
+  Exclude<ListChallansQuery["dispatch"], "all" | "returned">,
+  DispatchStatus
+> = {
+  pending: "Pending",
+  partial: "Partial",
+  sent: "Dispatched",
+  delivered: "Delivered",
+};
 
 function buildListFilter(query: ListChallansQuery): QueryFilter<Challan> {
   const clauses: QueryFilter<Challan>[] = [];
@@ -249,6 +283,21 @@ function buildListFilter(query: ListChallansQuery): QueryFilter<Challan> {
     clauses.push({
       chargeStatus: query.amount === "unpriced" ? "Unpriced" : "Partial",
     });
+  }
+  /**
+   * The dispatch backlog, off the status the Delivery module writes — the same
+   * indexed lookup the other two backlogs use.
+   */
+  if (query.dispatch === "returned") {
+    clauses.push(RETURNED_AT_DEPOT);
+  } else if (query.dispatch !== "all") {
+    clauses.push({ dispatchStatus: DISPATCH_FILTERS[query.dispatch] });
+  }
+  /** Billing, off the status the Bill module writes. A record never billed may predate the field. */
+  if (query.bill === "unbilled") {
+    clauses.push({ billStatus: { $nin: ["Partial", "Billed"] } });
+  } else if (query.bill !== "all") {
+    clauses.push({ billStatus: query.bill === "partial" ? "Partial" : "Billed" });
   }
   if (query.district) {
     /**
@@ -356,6 +405,11 @@ interface ChallanTotals {
   partialAmount: number;
   locationPending: number;
   locationReview: number;
+  /** Filed and on no trip yet, and split across trips with something still to go. */
+  notDispatched: number;
+  partlyDispatched: number;
+  /** Goods that came back off a trip and have not gone out again. */
+  returnedAtDepot: number;
 }
 
 /**
@@ -394,6 +448,26 @@ async function totalsFor(filter: QueryFilter<Challan>): Promise<ChallanTotals> {
         locationPending: {
           $sum: { $cond: [{ $eq: ["$locationStatus", "Pending"] }, 1, 0] },
         },
+        notDispatched: {
+          $sum: { $cond: [{ $eq: ["$dispatchStatus", "Pending"] }, 1, 0] },
+        },
+        partlyDispatched: {
+          $sum: { $cond: [{ $eq: ["$dispatchStatus", "Partial"] }, 1, 0] },
+        },
+        returnedAtDepot: {
+          $sum: {
+            $cond: [
+              {
+                $gt: [
+                  { $ifNull: ["$returnedQty", 0] },
+                  { $ifNull: ["$resentQty", 0] },
+                ],
+              },
+              1,
+              0,
+            ],
+          },
+        },
         /**
          * A location the machine inferred and nobody has read. The same set
          * `REVIEWABLE_LOCATION_SOURCES` names and the `review` filter queries,
@@ -426,6 +500,11 @@ async function totalsFor(filter: QueryFilter<Challan>): Promise<ChallanTotals> {
         partialAmount: 1,
         locationPending: 1,
         locationReview: 1,
+        // Left out of this list once, and the two dispatch chips silently
+        // counted nothing: an inclusion projection drops what it does not name.
+        notDispatched: 1,
+        partlyDispatched: 1,
+        returnedAtDepot: 1,
       },
     },
   ]);
@@ -438,6 +517,9 @@ async function totalsFor(filter: QueryFilter<Challan>): Promise<ChallanTotals> {
     partialAmount: 0,
     locationPending: 0,
     locationReview: 0,
+    notDispatched: 0,
+    partlyDispatched: 0,
+    returnedAtDepot: 0,
     unpricedChallans: 0,
   };
 
@@ -479,6 +561,9 @@ export async function listChallans(
     partialAmount: totals.partialAmount,
     locationPending: totals.locationPending,
     locationReview: totals.locationReview,
+    notDispatched: totals.notDispatched,
+    partlyDispatched: totals.partlyDispatched,
+    returnedAtDepot: totals.returnedAtDepot,
   };
 }
 
@@ -1416,6 +1501,8 @@ export async function setChallanLocation(
   challan.set("items", await withRates(storedItems(challan), fields));
   challan.updatedBy = actor._id;
   await challan.save();
+  // The Trip DO sheet copies the district, thana, location and rates.
+  await syncTripDoLedger([challan._id]);
 
   return serialize(challan);
 }
@@ -1744,6 +1831,8 @@ export async function submitChallan(
         { _id: input.submissionKey },
         { $set: { status: "completed", challanId: challan._id } },
       ),
+      // Its product lines, as rows on the Trip DO sheet. Never throws.
+      syncTripDoLedger([challan._id]),
     ]);
 
     return { record: await serialize(challan, actor), wasAlreadySubmitted: false };
@@ -1809,6 +1898,21 @@ export async function updateChallan(
 
   const previousKey = challan.document.key;
   const fields = normalizeFields(input);
+
+  /**
+   * A correction may not say that less went out than went out. Correcting a
+   * challan weeks later is ordinary; correcting it to four when six are on a
+   * lorry is a record that cannot be true, and the place to record that less
+   * was actually delivered is the trip, where the two move together.
+   */
+  await assertItemsCoverDispatched(
+    challan,
+    fields.items.map((item) => ({
+      productName: item.productName,
+      model: item.productModel,
+      qty: item.qty,
+    })),
+  );
 
   /**
    * The location, decided again — except where somebody had already decided
@@ -1885,8 +1989,89 @@ export async function updateChallan(
   }
 
   await discardChallanDocument(previousKey);
+  await syncTripDoLedger([challan._id]);
 
   return serialize(challan);
+}
+
+/**
+ * Rewrites a challan's product lines to what a delivery found.
+ *
+ * The Delivery module calls this when a trip is confirmed and what actually
+ * went on the lorry differs from what the paper said — a quantity trimmed
+ * because only three existed, a model replaced because the named one was out
+ * of stock, a product the challan never listed, a line that does not exist at
+ * all. The challan is the record of the delivery, so it is corrected; what a
+ * trip **splits** is not a correction and never reaches here, because the
+ * quantity left for the next lorry is still ordered.
+ *
+ * Three things about it are deliberate:
+ *
+ * - **It has no ownership check.** The same arrangement `addDriverToVendor`
+ *   has in the Vendor module: the caller decides *who* may — Delivery lets any
+ *   trip writer correct a challan they are dispatching, because the operator
+ *   at the gate is the one who can see what is on the lorry — and this decides
+ *   *how*, so a challan corrected from a trip is exactly the record a
+ *   correction through this module would have produced.
+ * - **The lines are re-priced.** A quantity, a model or a product changing is
+ *   precisely what changes a charge, so the card is read again and
+ *   `chargeStatus` follows from the pre-save hook. `withRates` is given the
+ *   challan's existing location, which a delivery cannot change.
+ * - **The stored document is left alone.** `updateChallan` regenerates the
+ *   back page and rewrites the object; there is nothing to regenerate for
+ *   this, because that page carries only the barcode, the SL and the challan
+ *   number, and none of those can change here. Reading and rewriting a PDF in
+ *   R2 per challan per trip would buy a byte-identical page.
+ *
+ * The record says it was amended, and by whom. *Why* is the trip: its manifest
+ * keeps what the line said when it was taken, beside what went.
+ */
+export async function applyDeliveryItems(
+  challan: ChallanDocument,
+  items: { productName: string; model: string; qty: number }[],
+  actor: UserDocument,
+): Promise<void> {
+  if (items.length === 0) {
+    throw new AppError(
+      409,
+      `${challan.challanNumber} would be left with no products at all. Remove the challan from the trip instead.`,
+    );
+  }
+
+  const normalized: NormalizedItem[] = items.map((item) => ({
+    productName: normalizeBanglaText(item.productName).value,
+    // A model number is a code, not prose — see `normalizeFields`.
+    productModel: item.model,
+    productModelKey: comparisonKey(item.model),
+    qty: item.qty,
+    capacity: "",
+    rate: null,
+  }));
+
+  challan.set(
+    "items",
+    await withRates(normalized, {
+      resolvedLocation: challan.resolvedLocation
+        ? {
+            masterId: String(challan.resolvedLocation.masterId),
+            district: challan.resolvedLocation.district,
+            thana: challan.resolvedLocation.thana,
+            locationType: challan.resolvedLocation.locationType as LocationType,
+            source: challan.resolvedLocation.source as LocationSource,
+            confidence: challan.resolvedLocation.confidence,
+            resolvedAt: challan.resolvedLocation.resolvedAt,
+            resolvedBy: challan.resolvedLocation.resolvedBy ?? null,
+          }
+        : null,
+      locationStatus: challan.locationStatus as LocationStatus,
+    }),
+  );
+
+  challan.status = "Amended";
+  challan.amendedAt = new Date();
+  challan.updatedBy = actor._id;
+
+  await challan.save();
 }
 
 /**
@@ -1905,6 +2090,15 @@ export async function removeChallan(
 ): Promise<{ id: string }> {
   const challan = await findChallan(id);
   assertCanDelete(challan, actor);
+  /**
+   * A challan that went out on a lorry is the paperwork behind a delivery that
+   * happened. The trip keeps its own copy of it, so the manifest would still
+   * read — but the link back would be dead, which is not a state this system
+   * should be able to reach by pressing Delete on the wrong row.
+   */
+  await assertChallanNotDispatched(challan);
+  // The same for a charge: a billed row with no challan behind it is a bill nobody can support.
+  await assertChallanNotBilled(challan._id);
 
   const key = challan.document.key;
   const batchId = challan.batchId;
@@ -1912,6 +2106,8 @@ export async function removeChallan(
   await challan.deleteOne();
   await discardChallanDocument(key);
   await refreshBatchProgress(batchId);
+  // Its rows leave the Trip DO sheet, Trip DOs and all.
+  await syncTripDoLedger([challan._id]);
 
   return { id: String(challan._id) };
 }

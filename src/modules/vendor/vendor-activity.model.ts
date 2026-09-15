@@ -1,6 +1,6 @@
 import { Schema, model } from 'mongoose'
 import type { InferSchemaType } from 'mongoose'
-import { ACTIVITY_ACTIONS } from './vendor.constants'
+import { ACTIVITY_ACTIONS, ACTIVITY_ENTITY_TYPES } from './vendor.constants'
 
 /**
  * What happened to a vendor, and who did it.
@@ -30,7 +30,7 @@ const vendorActivitySchema = new Schema(
     /** What the row is about, so the UI can put the right icon beside it. */
     entityType: {
       type: String,
-      enum: ['Vendor', 'Vehicle', 'Driver', 'Assignment', 'Document'],
+      enum: ACTIVITY_ENTITY_TYPES,
       required: true,
     },
     /** Null once the thing it named has been removed — the label survives. */

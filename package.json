@@ -7,7 +7,7 @@
     "build": "tsc",
     "start": "node dist/server.js",
     "lint": "eslint .",
-    "test": "tsx --test \"src/modules/**/*.test.ts\""
+    "test": "tsx --test \"src/**/*.test.ts\""
   },
   "type": "commonjs",
   "dependencies": {

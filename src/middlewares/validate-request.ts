@@ -17,6 +17,13 @@ interface RequestSchemas {
  *
  * A ZodError thrown here is caught by the global handler, which maps it to a
  * 400 with per-field errorSources.
+ *
+ * **What it attaches is merged, never replaced.** A route may reach this twice
+ * — the vendor document endpoints validate the id, parse the multipart body,
+ * and only then validate that body, because a multipart field does not exist
+ * until the parser has run. Assigning `req.validated` wholesale on the second
+ * pass dropped the params the first one wrote, and every handler reading an id
+ * out of it answered "Invalid id." on a request that was perfectly valid.
  */
 export function validateRequest(schemas: RequestSchemas) {
   return (req: Request, _res: Response, next: NextFunction): void => {
@@ -36,7 +43,9 @@ export function validateRequest(schemas: RequestSchemas) {
       validated.params = schemas.params.parse(req.params)
     }
 
-    req.validated = validated
+    // Merged rather than assigned: see above. A later pass overwrites only the
+    // sections it actually parsed.
+    req.validated = { ...req.validated, ...validated }
     next()
   }
 }

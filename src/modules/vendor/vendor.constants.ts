@@ -315,7 +315,28 @@ export const ACTIVITY_ACTIONS = [
   'document.created',
   'document.updated',
   'document.deleted',
+  /**
+   * Written by the Delivery module, not this one — a trip is assigned *to* a
+   * vendor, and the vendor's own activity tab is where somebody looking at
+   * that vendor expects to see it. It stays the one journal rather than a
+   * second one per module.
+   */
+  'trip.created',
+  'trip.updated',
+  'trip.status',
+  'trip.deleted',
 ] as const
+
+/** What an activity row is about. `Trip` rows come from the Delivery module. */
+export const ACTIVITY_ENTITY_TYPES = [
+  'Vendor',
+  'Vehicle',
+  'Driver',
+  'Assignment',
+  'Document',
+  'Trip',
+] as const
+export type ActivityEntityType = (typeof ACTIVITY_ENTITY_TYPES)[number]
 export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number]
 
 // --- Permissions -----------------------------------------------------------
