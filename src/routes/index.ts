@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { accountsRoutes } from '../modules/accounts/accounts.route'
 import { administrationRoutes } from '../modules/administration/administration.route'
 import { billRoutes } from '../modules/bill/bill.route'
 import { challanBatchRoutes, challanRoutes } from '../modules/challan/challan.route'
@@ -93,6 +94,12 @@ const routes: RouteDefinition[] = [
    * challans and gate passes behind them — and nothing else about either.
    */
   { path: '/bills', route: billRoutes },
+  /**
+   * Accounts: the office's money. It reads one thing out of the rest of the
+   * system — a trip's rent and labour bill — and writes into nothing, except
+   * that a trip with an advance against it cannot be deleted from Delivery.
+   */
+  { path: '/accounts', route: accountsRoutes },
 ]
 
 const router = Router()

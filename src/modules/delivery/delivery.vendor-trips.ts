@@ -1,7 +1,8 @@
 import { Types } from 'mongoose'
 import type { QueryFilter } from 'mongoose'
-import { plateSearchKey } from './delivery.constants'
-import type { TripStatus } from './delivery.constants'
+import { AppError } from '../../utils/app-error'
+import { completionMethodFor, plateSearchKey } from './delivery.constants'
+import type { CompletionMethod, TripStatus } from './delivery.constants'
 import { DeliveryModel } from './delivery.model'
 import type { Delivery } from './delivery.model'
 import type { VendorTripsQuery } from './delivery.validation'
@@ -73,10 +74,8 @@ const PROJECTION =
   'tripNumber tripDate status vehicle.registrationNo driver.name challanCount totalQty ' +
   'tripRent labourBill challans.completedAt challans.returned.qty'
 
-export async function listVendorTrips(
-  vendorId: string,
-  query: VendorTripsQuery,
-): Promise<VendorTripList> {
+/** The filter the list, its totals and its matching trip refs all share. */
+function vendorTripFilter(vendorId: string, query: VendorTripsQuery): QueryFilter<Delivery> {
   /**
    * An ObjectId rather than the string, because the same filter feeds the
    * totals aggregation and a `$match` does no schema casting.
@@ -113,7 +112,14 @@ export async function listVendorTrips(
     clauses.push({ $or: or })
   }
 
-  const filter: QueryFilter<Delivery> = { $and: clauses }
+  return { $and: clauses }
+}
+
+export async function listVendorTrips(
+  vendorId: string,
+  query: VendorTripsQuery,
+): Promise<VendorTripList> {
+  const filter = vendorTripFilter(vendorId, query)
   const skip = (query.page - 1) * query.limit
 
   const [trips, totals] = await Promise.all([
@@ -177,5 +183,128 @@ export async function listVendorTrips(
     totalLabour: totals[0]?.totalLabour ?? 0,
     blankRent: totals[0]?.blankRent ?? 0,
     blankLabour: totals[0]?.blankLabour ?? 0,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// One trip
+// ---------------------------------------------------------------------------
+
+export interface VendorTripLine {
+  productName: string
+  model: string
+  qty: number
+  returnedQty: number
+}
+
+/**
+ * One challan on the trip, as a vendor may see it: which challan, which
+ * district and thana, what went and what came back. Never the customer, the
+ * delivery address or the receiver's number.
+ */
+export interface VendorTripChallan {
+  challanNumber: string
+  slNumber: number
+  district: string
+  thana: string
+  locationType: string | null
+  qty: number
+  returnedQty: number
+  completionMethod: CompletionMethod | null
+  lines: VendorTripLine[]
+}
+
+export interface VendorTripDetail {
+  id: string
+  tripNumber: string
+  tripDate: Date
+  status: TripStatus
+  registrationNo: string
+  driverName: string
+  driverMobile: string
+  challanCount: number
+  completedChallans: number
+  totalQty: number
+  returnedQty: number
+  deliveredQty: number
+  tripRent: number | null
+  labourBill: number | null
+  challans: VendorTripChallan[]
+}
+
+/**
+ * The same rule as the list: a projection that names every field it reads, so
+ * a customer's details are never loaded off the collection at all.
+ */
+const DETAIL_PROJECTION =
+  'tripNumber tripDate status vehicle.registrationNo driver.name driver.mobile challanCount totalQty ' +
+  'tripRent labourBill challans.challanNumber challans.slNumber challans.district challans.thana ' +
+  'challans.location challans.lines.productName challans.lines.productModel challans.lines.productModelKey ' +
+  'challans.lines.qty challans.returned.productName challans.returned.productModelKey challans.returned.qty ' +
+  'challans.receivedCopy.uploadedAt challans.copyMissing'
+
+/** One trip of this vendor's, or 404 — including for a trip that belongs to another vendor. */
+export async function getVendorTripDetail(vendorId: string, tripId: string): Promise<VendorTripDetail> {
+  const trip = await DeliveryModel.findOne({ _id: tripId, vendorId }).select(DETAIL_PROJECTION).lean()
+  if (!trip) {
+    throw new AppError(404, 'Trip not found.')
+  }
+
+  const challans = (trip.challans ?? []).map((challan): VendorTripChallan => {
+    const returned = challan.returned ?? []
+    const lineKey = (name: string, modelKey: string) => `${name.trim().toLowerCase()}|${modelKey}`
+    const returnedBy = new Map<string, number>()
+    for (const line of returned) {
+      const key = lineKey(line.productName, line.productModelKey)
+      returnedBy.set(key, (returnedBy.get(key) ?? 0) + line.qty)
+    }
+
+    const lines = (challan.lines ?? []).map((line) => ({
+      productName: line.productName,
+      model: line.productModel,
+      qty: line.qty,
+      returnedQty: returnedBy.get(lineKey(line.productName, line.productModelKey)) ?? 0,
+    }))
+    const qty = lines.reduce((sum, line) => sum + line.qty, 0)
+    const returnedQty = returned.reduce((sum, line) => sum + line.qty, 0)
+
+    return {
+      challanNumber: challan.challanNumber,
+      slNumber: challan.slNumber,
+      // The trip's own copy first, the resolved location under it — the manifest's rule.
+      district: challan.district || challan.location?.district || '',
+      thana: challan.thana || challan.location?.thana || '',
+      locationType: challan.location?.locationType ?? null,
+      qty,
+      returnedQty,
+      completionMethod: completionMethodFor({
+        hasCopy: Boolean(challan.receivedCopy),
+        copyMissing: Boolean(challan.copyMissing),
+        carried: qty,
+        returned: returnedQty,
+      }),
+      lines,
+    }
+  })
+
+  const returnedQty = challans.reduce((sum, challan) => sum + challan.returnedQty, 0)
+  const totalQty = trip.totalQty ?? 0
+
+  return {
+    id: String(trip._id),
+    tripNumber: trip.tripNumber,
+    tripDate: trip.tripDate,
+    status: trip.status as TripStatus,
+    registrationNo: trip.vehicle.registrationNo,
+    driverName: trip.driver.name,
+    driverMobile: trip.driver.mobile ?? '',
+    challanCount: trip.challanCount ?? challans.length,
+    completedChallans: challans.filter((challan) => challan.completionMethod !== null).length,
+    totalQty,
+    returnedQty,
+    deliveredQty: totalQty - returnedQty,
+    tripRent: trip.tripRent ?? null,
+    labourBill: trip.labourBill ?? null,
+    challans,
   }
 }

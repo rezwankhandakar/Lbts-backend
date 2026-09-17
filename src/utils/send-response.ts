@@ -29,6 +29,21 @@ export interface ResponseMeta {
   blankRent?: number
   blankLabour?: number
   /**
+   * A vendor's Trips tab: the vendor's bill for the whole months the date range
+   * touches — billed, advanced, paid, due. Paid and due are a month's figures,
+   * never a trip's, because a vendor payment names a month.
+   */
+  monthlyBill?: {
+    label: string
+    tripCount: number
+    blankBills: number
+    totalBill: number
+    advance: number
+    paid: number
+    due: number
+    status: string
+  }
+  /**
    * Backlog counts a list draws as chips beside its totals — how many of the
    * matching records still want somebody's attention, and for what. Challan
    * sends four; every one of them is also a filter, so a chip is a way in

@@ -2,6 +2,7 @@ import { Types } from 'mongoose'
 import type { QueryFilter } from 'mongoose'
 import { AppError } from '../../utils/app-error'
 import { nextSequence } from '../../utils/counter'
+import { assertTripHasNoAdvances } from '../accounts/accounts.guards'
 import { MAX_CHALLAN_ITEMS } from '../challan/challan.constants'
 import { ChallanModel } from '../challan/challan.model'
 import type { ChallanDocument } from '../challan/challan.model'
@@ -1051,6 +1052,8 @@ export async function removeTrip(id: string, actor: UserDocument): Promise<{ id:
         'Remove a signed copy first if one was filed against the wrong trip.',
     )
   }
+
+  await assertTripHasNoAdvances(trip._id, trip.tripNumber)
 
   const carried = trip.challans.map((challan) => String(challan.challanId))
   await trip.deleteOne()

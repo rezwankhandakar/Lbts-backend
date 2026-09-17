@@ -44,7 +44,8 @@ import {
   setVehiclePhoto,
   updateVehicle,
 } from './vehicle.service'
-import { listVendorTrips } from '../delivery/delivery.vendor-trips'
+import { getVendorTripDetail, listVendorTrips } from '../delivery/delivery.vendor-trips'
+import { tripAdvanceEntries, tripAdvancesFor, vendorMonthlyBill } from '../accounts/vendor-trip-money'
 import type { VendorTripsQuery } from '../delivery/delivery.validation'
 import { listActivity } from './vendor.activity'
 import { ownVendorIdOf } from './vendor.access'
@@ -80,6 +81,7 @@ import type {
   VehicleStatusInput,
   VendorOptionsQuery,
   VendorStatusInput,
+  VendorTripParam,
 } from './vendor.validation'
 
 /**
@@ -208,14 +210,49 @@ export async function getVendorTrips(req: Request, res: Response): Promise<void>
 
   await getVendor(id, actorFrom(req))
 
-  const { records, total, totalQty, totalRent, totalLabour, blankRent, blankLabour } =
-    await listVendorTrips(id, query)
+  const [list, monthlyBill] = await Promise.all([
+    listVendorTrips(id, query),
+    // Paid and due are the month's, so the bill covers whole months and ignores every filter but the dates.
+    vendorMonthlyBill(id, query.from, query.to),
+  ])
+  const { records, total, totalQty, totalRent, totalLabour, blankRent, blankLabour } = list
+  const advances = await tripAdvancesFor(records.map((record) => record.id))
 
   sendResponse(res, {
     statusCode: 200,
     message: 'Trips retrieved',
-    data: records,
-    meta: { ...metaFor(query, total), totalQty, totalRent, totalLabour, blankRent, blankLabour },
+    data: records.map((record) => ({
+      ...record,
+      bill: (record.tripRent ?? 0) + (record.labourBill ?? 0),
+      advance: advances.get(record.id) ?? 0,
+    })),
+    meta: { ...metaFor(query, total), totalQty, totalRent, totalLabour, blankRent, blankLabour, monthlyBill },
+  })
+}
+
+/**
+ * One of a vendor's trips, for the Trips tab's detail sheet — scoped exactly as
+ * the list is, and answering 404 for a trip under any other vendor. Built from
+ * the same customer-free projection rule, with the trip's bill and advances
+ * beside it. Paid and due are not here: they belong to the month.
+ */
+export async function getVendorTrip(req: Request, res: Response): Promise<void> {
+  const { id, tripId } = req.validated?.params as VendorTripParam
+
+  await getVendor(id, actorFrom(req))
+
+  const [trip, advances] = await Promise.all([getVendorTripDetail(id, tripId), tripAdvanceEntries(tripId)])
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Trip retrieved',
+    data: {
+      ...trip,
+      tripDate: trip.tripDate.toISOString().slice(0, 10),
+      bill: (trip.tripRent ?? 0) + (trip.labourBill ?? 0),
+      advance: advances.reduce((sum, entry) => sum + entry.amount, 0),
+      advances,
+    },
   })
 }
 

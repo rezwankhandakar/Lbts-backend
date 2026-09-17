@@ -14,6 +14,9 @@ import {
 const objectId = z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid id.')
 
 export const idParamSchema = z.object({ id: objectId })
+/** One of a vendor's trips: the vendor, then the trip, both checked. */
+export const vendorTripParamSchema = z.object({ id: objectId, tripId: objectId })
+export type VendorTripParam = z.infer<typeof vendorTripParamSchema>
 export type IdParam = z.infer<typeof idParamSchema>
 
 /**

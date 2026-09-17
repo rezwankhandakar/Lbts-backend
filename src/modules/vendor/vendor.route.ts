@@ -36,6 +36,7 @@ import {
   getVehicleHistory,
   getVehicleOne,
   getVehicles,
+  getVendorTrip,
   getVendorTrips,
   getVendors,
   patchAssignmentEnd,
@@ -66,6 +67,7 @@ import {
   driverStatusSchema,
   endAssignmentSchema,
   idParamSchema,
+  vendorTripParamSchema,
   listAssignmentsQuerySchema,
   listDocumentsQuerySchema,
   listDriversQuerySchema,
@@ -161,6 +163,7 @@ vendors.get(
   validateRequest({ params: idParamSchema, query: vendorTripsQuerySchema }),
   getVendorTrips,
 )
+vendors.get('/:id/trips/:tripId', validateRequest({ params: vendorTripParamSchema }), getVendorTrip)
 vendors.get(
   '/:id/activity',
   validateRequest({ params: idParamSchema, query: activityQuerySchema }),

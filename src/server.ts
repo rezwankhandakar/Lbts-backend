@@ -8,6 +8,8 @@ import {
   registerConnectionEvents,
 } from './config/db'
 import { ensureDnsResolvers } from './config/dns'
+import { migrateExpenseNames } from './modules/accounts/accounts.migration'
+import { seedAccounts } from './modules/accounts/accounts.seed'
 import { backfillBillingStatus } from './modules/bill/bill.status'
 import {
   backfillChallanChargeStatus,
@@ -92,6 +94,10 @@ function start(): void {
     // a single product on the record itself, where nothing can read it — and
     // where its quantity drops out of every total the list reports.
     void foldLegacyChallanProducts()
+    // A first cash wallet, into an empty collection only.
+    void seedAccounts()
+    // Expenses recorded under the retired category list get that name as their typed expense name.
+    void migrateExpenseNames()
     /**
      * The `deliveries` collection was used once by an earlier delivery design
      * whose documents this module cannot read — and one of them made the trips
