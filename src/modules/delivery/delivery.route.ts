@@ -14,6 +14,7 @@ import {
   getChallanDispatchOne,
   getChallanScan,
   getReceiptScan,
+  getTripScan,
   getReceivedCopyFile,
   getStats,
   getTripOne,
@@ -39,6 +40,7 @@ import {
   listTripsQuerySchema,
   quickDriverSchema,
   receiptScanQuerySchema,
+  tripScanQuerySchema,
   receivedCopyBodySchema,
   statsQuerySchema,
   tripBillSchema,
@@ -130,6 +132,20 @@ router.get(
   lookupLimiter,
   validateRequest({ query: receiptScanQuerySchema }),
   getReceiptScan,
+)
+
+/**
+ * A manifest's own barcode, read off the printed sheet: open this trip.
+ *
+ * The third scan endpoint here, declared before `/:id` like every other static
+ * segment. It is a read, so it sits under the router's own `canRead` and takes
+ * no write role — a CEO holding a manifest may open the trip it names.
+ */
+router.get(
+  '/trips/scan',
+  lookupLimiter,
+  validateRequest({ query: tripScanQuerySchema }),
+  getTripScan,
 )
 
 /**

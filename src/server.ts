@@ -11,6 +11,7 @@ import { ensureDnsResolvers } from './config/dns'
 import { migrateExpenseNames } from './modules/accounts/accounts.migration'
 import { seedAccounts } from './modules/accounts/accounts.seed'
 import { backfillBillingStatus } from './modules/bill/bill.status'
+import { dropLabourBillSlotCsd } from './modules/labour-bill/labour-bill.migration'
 import {
   backfillChallanChargeStatus,
   backfillChallanLocations,
@@ -98,6 +99,9 @@ function start(): void {
     void seedAccounts()
     // Expenses recorded under the retired category list get that name as their typed expense name.
     void migrateExpenseNames()
+    // A labour bill's slot was briefly a CSD and a month; it is a month, and the
+    // sheet splits itself by the CSD on each row, so the field describes nothing.
+    void dropLabourBillSlotCsd()
     /**
      * The `deliveries` collection was used once by an earlier delivery design
      * whose documents this module cannot read — and one of them made the trips

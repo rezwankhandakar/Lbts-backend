@@ -114,12 +114,16 @@ export function cashFlowOf(parts: CashFlowParts): CashFlow {
  * cash, an advance comes back into cash, and a transfer moves money between
  * two cash wallets and nowhere else.
  *
- * A bank or mobile wallet has exactly one use: receiving a Walton payment
- * against a final bill, so the bill knows what has arrived and where. Nothing
- * is spent from one and nothing is moved into or out of one.
+ * A bank or mobile wallet has exactly one use: receiving a **Walton payment** —
+ * against a final bill, or against one CSD of a month's labour bill. Nothing is
+ * spent from one and nothing is moved into or out of one.
+ *
+ * The two kinds of Walton payment are one rule rather than two, because they
+ * are the same event: Walton settling a claim. Which claim it settles decides
+ * what the payment is recorded against, not how it is allowed to arrive.
  */
-export function requiresCashWallet(kind: EntryKind, againstFinalBill: boolean): boolean {
-  return !(kind === 'Deposit' && againstFinalBill)
+export function requiresCashWallet(kind: EntryKind, againstWaltonBill: boolean): boolean {
+  return !(kind === 'Deposit' && againstWaltonBill)
 }
 
 /**
@@ -127,7 +131,12 @@ export function requiresCashWallet(kind: EntryKind, againstFinalBill: boolean): 
  * wallet — everything except a Walton payment — so a wallet holding any of them
  * cannot be turned into a bank or mobile wallet.
  */
-export const CASH_ENTRY_FILTER = { $nor: [{ kind: 'Deposit' as EntryKind, finalBillId: { $ne: null } }] }
+export const CASH_ENTRY_FILTER = {
+  $nor: [
+    { kind: 'Deposit' as EntryKind, finalBillId: { $ne: null } },
+    { kind: 'Deposit' as EntryKind, labourBillId: { $ne: null } },
+  ],
+}
 
 /** Kinds that name a wallet, and the one that names a second. */
 export function entryUsesWallet(kind: EntryKind): boolean {
@@ -344,6 +353,41 @@ export const MAX_REPORT_MONTHS = 36
 
 /** Months a cash summary may span — ten years, so it can be read year by year. */
 export const MAX_CASH_SUMMARY_MONTHS = 120
+
+// --- Vouchers ------------------------------------------------------------------
+
+/**
+ * The paper behind an entry: a fuel bill, a repair invoice, a receipt signed
+ * for an advance, a supplier's cash memo.
+ *
+ * One file per entry, never a queue — a two-sheet invoice is one PDF, which is
+ * the same contract a vendor compliance document and a signed challan copy
+ * have, and the reason all three share `DocumentScanPanel` on the client.
+ *
+ * It is attached to the **entry**, not to an expense. Entries are one
+ * collection of eight kinds, and the voucher behind a vendor payment is the
+ * same piece of paper as the invoice behind an expense — a rule admitting only
+ * one kind would be one nobody asked for, and a second collection to hold the
+ * others.
+ *
+ * The two limits and their reasoning are the gate pass scan's: a photograph of
+ * a cash memo is an image, a multi-sheet invoice off the feeder is a PDF, and
+ * neither is resized past the point where an amount can be read off it.
+ */
+export const VOUCHER_MIME_TYPES = [
+  'application/pdf',
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+] as const
+export type VoucherMimeType = (typeof VOUCHER_MIME_TYPES)[number]
+
+export const MAX_VOUCHER_IMAGE_BYTES = 10 * 1024 * 1024
+export const MAX_VOUCHER_PDF_BYTES = 25 * 1024 * 1024
+
+export function maxVoucherBytesFor(mimeType: string): number {
+  return mimeType === 'application/pdf' ? MAX_VOUCHER_PDF_BYTES : MAX_VOUCHER_IMAGE_BYTES
+}
 
 // --- Permissions ---------------------------------------------------------------
 

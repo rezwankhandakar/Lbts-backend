@@ -96,12 +96,19 @@ const depositShape = z.object({
   /**
    * A deposit is money added into cash; where it came from is not asked. The
    * source is written by the service — a Walton payment when it names a final
-   * bill, otherwise a plain deposit — and is accepted here only so an older
-   * client that still sends one is not refused.
+   * bill or a labour bill's CSD, otherwise a plain deposit — and is accepted
+   * here only so an older client that still sends one is not refused.
    */
   source: z.enum(DEPOSIT_SOURCES).optional(),
   party: text(120),
   finalBillId: objectId.nullable().default(null),
+  /**
+   * A payment against one CSD of a month's labour bill. Both halves or
+   * neither — see `refineDeposit`: a bill without a CSD names a whole month,
+   * which is not a thing anybody is paid for.
+   */
+  labourBillId: objectId.nullable().default(null),
+  labourCsd: z.string().trim().max(24).default(''),
 })
 
 const transferShape = z.object({
@@ -177,16 +184,68 @@ function refineTransfer(value: { kind: string; walletId?: string; toWalletId?: s
   }
 }
 
+/**
+ * What a Walton payment may point at. Refined here rather than on the deposit
+ * shape itself, because `discriminatedUnion` wants plain objects as members.
+ */
+function refineDeposit(
+  value: { kind: string; finalBillId?: string | null; labourBillId?: string | null; labourCsd?: string },
+  ctx: z.RefinementCtx,
+) {
+  if (value.kind !== 'Deposit') {
+    return
+  }
+  if (value.finalBillId && value.labourBillId) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['labourBillId'],
+      message: 'A payment settles a final bill or a labour bill CSD, not both.',
+    })
+  }
+  if (Boolean(value.labourBillId) !== Boolean(value.labourCsd)) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['labourCsd'],
+      message: 'Name the CSD the labour bill payment is against.',
+    })
+  }
+}
+
+function refineEntry(value: Parameters<typeof refineTransfer>[0], ctx: z.RefinementCtx) {
+  refineTransfer(value, ctx)
+  refineDeposit(value as Parameters<typeof refineDeposit>[0], ctx)
+}
+
 export const createEntrySchema = z
   .discriminatedUnion('kind', entryShapes)
   .and(z.object({ submissionKey: z.string().trim().min(8).max(80) }))
-  .superRefine(refineTransfer)
+  .superRefine(refineEntry)
 export type CreateEntryInput = z.infer<typeof createEntrySchema>
 
 /** A correction carries the whole entry again. Its kind must be the kind it already is. */
-export const updateEntrySchema = z.discriminatedUnion('kind', entryShapes).superRefine(refineTransfer)
+export const updateEntrySchema = z.discriminatedUnion('kind', entryShapes).superRefine(refineEntry)
 export type UpdateEntryInput = z.infer<typeof updateEntrySchema>
 export type EntryInput = z.infer<(typeof entryShapes)[number]>
+
+/**
+ * The page count beside an uploaded voucher.
+ *
+ * Multipart carries strings, so it is coerced; and it is optional because only
+ * the scanner agent knows how many sheets it fed. A file chosen off a disk
+ * reports nothing, and a page count nobody measured is worse than none — the
+ * same contract `receivedCopyBodySchema` has in Delivery.
+ */
+export const voucherBodySchema = z.object({
+  pageCount: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(500)
+    .nullable()
+    .optional()
+    .transform((value) => value ?? null),
+})
+export type VoucherBody = z.infer<typeof voucherBodySchema>
 
 const page = z.coerce.number().int().min(1).default(1)
 const limit = (fallback: number) => z.coerce.number().int().min(1).max(MAX_ACCOUNTS_PAGE_SIZE).default(fallback)
@@ -292,6 +351,22 @@ export type ListFinalBillsQuery = z.infer<typeof listFinalBillsQuerySchema>
 
 export const finalBillSlotQuerySchema = z.object({ year, month, unit })
 export type FinalBillSlotQuery = z.infer<typeof finalBillSlotQuerySchema>
+
+// ---------------------------------------------------------------------------
+// Walton labour bill receivables
+// ---------------------------------------------------------------------------
+
+/**
+ * The months list. There is no CSD filter: a month card opens its own CSDs,
+ * which is the level a CSD is chosen at.
+ */
+export const listLabourReceivablesQuerySchema = z.object({
+  page,
+  limit: limit(24),
+  year: z.preprocess((value) => (value === '' ? undefined : value), year.optional()),
+  status: z.enum(['all', ...SETTLEMENT_STATUSES]).default('all'),
+})
+export type ListLabourReceivablesQuery = z.infer<typeof listLabourReceivablesQuerySchema>
 
 // ---------------------------------------------------------------------------
 // Reports

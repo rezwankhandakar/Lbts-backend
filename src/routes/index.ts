@@ -5,6 +5,7 @@ import { billRoutes } from '../modules/bill/bill.route'
 import { challanBatchRoutes, challanRoutes } from '../modules/challan/challan.route'
 import { deliveryRoutes } from '../modules/delivery/delivery.route'
 import { gatePassRoutes } from '../modules/gate-pass/gate-pass.route'
+import { labourBillRoutes } from '../modules/labour-bill/labour-bill.route'
 import { locationRoutes } from '../modules/location/location.route'
 import { productRateRoutes } from '../modules/product-rate/product-rate.route'
 import { profileRoutes } from '../modules/profile/profile.route'
@@ -94,6 +95,13 @@ const routes: RouteDefinition[] = [
    * challans and gate passes behind them — and nothing else about either.
    */
   { path: '/bills', route: billRoutes },
+  /**
+   * Walton Labour Bills: a month of scanned challans, and what the handling on
+   * each model cost. It reads the Trip DO sheet and **claims nothing** — the
+   * Excel Bill charges a run its transport rate and this one charges the same
+   * run its handling, so a row belongs to both and neither is wrong.
+   */
+  { path: '/labour-bills', route: labourBillRoutes },
   /**
    * Accounts: the office's money. It reads one thing out of the rest of the
    * system — a trip's rent and labour bill — and writes into nothing, except

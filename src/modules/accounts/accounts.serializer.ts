@@ -1,5 +1,6 @@
 import type { Types } from 'mongoose'
 import { resolveActorNames } from '../vendor/vendor.lookups'
+import { LabourBillModel } from '../labour-bill/labour-bill.model'
 import { entryDirection, outstandingOf, periodLabel } from './accounts.constants'
 import type {
   DepositSource,
@@ -22,6 +23,24 @@ export interface WalletRef {
   kind: WalletKind
 }
 
+/**
+ * The paper behind an entry, as a list renders it.
+ *
+ * `url` is an API path rather than a bucket URL: the object is private, so the
+ * browser cannot put it in a `src` and fetches it through axios — the only
+ * thing that attaches the Firebase token — exactly as it does a gate pass scan,
+ * a vendor document and a signed challan copy.
+ */
+export interface VoucherRecord {
+  url: string
+  mimeType: string
+  size: number
+  originalName: string
+  pageCount: number | null
+  uploadedAt: string
+  uploadedBy: ActorRef | null
+}
+
 export interface EntryRecord {
   id: string
   entryNumber: string
@@ -38,6 +57,8 @@ export interface EntryRecord {
   note: string
   source: DepositSource | null
   finalBill: { id: string; label: string } | null
+  /** A Walton payment against one CSD of a month's labour bill. */
+  labourBill: { id: string; csd: string; label: string } | null
   /** What an expense, or an advance accepted as one, was for. Empty for every other kind. */
   expenseName: string
   purpose: string
@@ -49,6 +70,8 @@ export interface EntryRecord {
   vendor: { id: string; vendorCode: string; name: string } | null
   trip: { id: string; tripNumber: string; tripDate: string; registrationNo: string; driverName: string } | null
   period: { year: number; month: number; label: string } | null
+  /** The voucher or invoice behind this entry, or null while none is on record. */
+  voucher: VoucherRecord | null
   createdBy: ActorRef | null
   createdAt: string
   updatedBy: ActorRef | null
@@ -78,6 +101,8 @@ export function finalBillLabel(bill: Pick<FinalBillDocument, 'unit' | 'year' | '
 interface EntryContext {
   wallets: Map<string, WalletDocument>
   finalBills: Map<string, string>
+  /** A labour bill's period, by id: "September 2026". */
+  labourBills: Map<string, string>
   names: Map<string, string>
 }
 
@@ -103,6 +128,17 @@ export function toEntryRecord(entry: EntryDocument, context: EntryContext): Entr
     finalBill: entry.finalBillId
       ? { id: String(entry.finalBillId), label: context.finalBills.get(String(entry.finalBillId)) ?? 'Removed bill' }
       : null,
+    labourBill: entry.labourBillId
+      ? {
+          id: String(entry.labourBillId),
+          csd: entry.labourCsd ?? '',
+          // The CSD is the entry's own copy, so a receipt reads even after the
+          // sheet has moved; the month comes from the bill it points at.
+          label: [entry.labourCsd, context.labourBills.get(String(entry.labourBillId))]
+            .filter(Boolean)
+            .join(' · '),
+        }
+      : null,
     expenseName: entry.expenseName ?? '',
     purpose: entry.purpose ?? '',
     settledAmount: entry.settledAmount ?? 0,
@@ -126,6 +162,18 @@ export function toEntryRecord(entry: EntryDocument, context: EntryContext): Entr
     period: entry.period
       ? { year: entry.period.year, month: entry.period.month, label: periodLabel(entry.period) }
       : null,
+    voucher: entry.voucher
+      ? {
+          // The bucket never serves this. See `VoucherRecord`.
+          url: `/accounts/entries/${String(entry._id)}/voucher`,
+          mimeType: entry.voucher.mimeType,
+          size: entry.voucher.size,
+          originalName: entry.voucher.originalName ?? '',
+          pageCount: entry.voucher.pageCount ?? null,
+          uploadedAt: entry.voucher.uploadedAt.toISOString(),
+          uploadedBy: actorOf(entry.voucher.uploadedBy, context.names),
+        }
+      : null,
     createdBy: actorOf(entry.createdBy, context.names),
     createdAt: entry.createdAt.toISOString(),
     updatedBy: actorOf(entry.updatedBy, context.names),
@@ -144,21 +192,31 @@ export async function serializeEntries(entries: EntryDocument[]): Promise<EntryR
 
   const walletIds = new Set<string>()
   const billIds = new Set<string>()
+  const labourIds = new Set<string>()
   for (const entry of entries) {
     if (entry.walletId) walletIds.add(String(entry.walletId))
     if (entry.toWalletId) walletIds.add(String(entry.toWalletId))
     if (entry.finalBillId) billIds.add(String(entry.finalBillId))
+    if (entry.labourBillId) labourIds.add(String(entry.labourBillId))
   }
 
-  const [wallets, bills, names] = await Promise.all([
+  const [wallets, bills, labourBills, names] = await Promise.all([
     walletIds.size > 0 ? WalletModel.find({ _id: { $in: [...walletIds] } }) : Promise.resolve([]),
     billIds.size > 0 ? FinalBillModel.find({ _id: { $in: [...billIds] } }).select('unit year month') : Promise.resolve([]),
-    resolveActorNames(entries.flatMap((entry) => [entry.createdBy, entry.updatedBy])),
+    labourIds.size > 0
+      ? LabourBillModel.find({ _id: { $in: [...labourIds] } }).select('year month')
+      : Promise.resolve([]),
+    resolveActorNames(
+      entries.flatMap((entry) => [entry.createdBy, entry.updatedBy, entry.voucher?.uploadedBy ?? null]),
+    ),
   ])
 
   const context: EntryContext = {
     wallets: new Map(wallets.map((wallet) => [String(wallet._id), wallet])),
     finalBills: new Map(bills.map((bill) => [String(bill._id), finalBillLabel(bill)])),
+    labourBills: new Map(
+      labourBills.map((bill) => [String(bill._id), periodLabel({ year: bill.year, month: bill.month })]),
+    ),
     names,
   }
 

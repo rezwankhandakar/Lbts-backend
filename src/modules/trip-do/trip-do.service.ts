@@ -1,6 +1,12 @@
 import type { QueryFilter, Types } from 'mongoose'
 import { AppError } from '../../utils/app-error'
 import { refreshBillingStatus } from '../bill/bill.status'
+/**
+ * A labour bill copies a row's CSD off this sheet, so setting or clearing a
+ * Trip DO is what moves that row between the sheet's CSD sections. It never
+ * throws — see `syncLabourBillCopies`.
+ */
+import { syncLabourBillCopies } from '../labour-bill/labour-bill.lines'
 import { canViewRecord } from '../gate-pass/gate-pass.access'
 import { comparisonKey } from '../gate-pass/gate-pass.constants'
 import { GatePassModel } from '../gate-pass/gate-pass.model'
@@ -745,6 +751,8 @@ export async function linkRow(
   await row.save()
   // A new unbilled row on a billed gate pass makes it partly billed again.
   await refreshBillingStatus({ gatePassIds: [gatePass._id, previous?.gatePassId] })
+  // And the row now has a CSD, so any labour bill holding it files it under one.
+  await syncLabourBillCopies([row._id])
 
   return {
     gatePassNumber: gatePass.gatePassId,
@@ -825,6 +833,7 @@ export async function bulkLinkRows(
   await refreshBillingStatus({
     gatePassIds: [gatePass._id, ...rows.map((row) => row.link?.gatePassId)],
   })
+  await syncLabourBillCopies(rows.map((row) => row._id))
 
   return {
     gatePassNumber: gatePass.gatePassId,
@@ -866,6 +875,8 @@ export async function unlinkRow(rowId: string): Promise<{ qty: number }> {
     await TripDoLineModel.deleteMany({ _id: { $in: siblings.map((sibling) => sibling._id) } })
   }
   await refreshBillingStatus({ gatePassIds: [gatePassId] })
+  // Unlinking takes the CSD away again, so the row goes back to pending.
+  await syncLabourBillCopies([row._id, ...siblings.map((sibling) => sibling._id)])
 
   return { qty: row.qty }
 }

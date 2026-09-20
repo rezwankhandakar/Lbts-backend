@@ -328,8 +328,18 @@ export interface VendorStats {
  */
 export async function getVendorStats(viewer: UserDocument): Promise<VendorStats> {
   const scope = vendorFilterFor(viewer)
-  const vendorMatch = scope ? { _id: scope.vendorId } : {}
-  const childMatch: Record<string, unknown> = scope ? { vendorId: scope.vendorId } : {}
+  /**
+   * The scope arrives as a string and two of the four reads below are
+   * aggregations, which **do no schema casting** — so a string `_id` there
+   * matches nothing and a Vendor account is told it has no vendor, no documents
+   * and nothing expiring. `countDocuments` casts and was right all along, which
+   * is what made this hide: vehicles and drivers counted correctly beside three
+   * silent zeroes. The same trap `getVendorSummary` above names, and the reason
+   * it casts once at the top.
+   */
+  const vendorId = scope ? new Types.ObjectId(scope.vendorId) : null
+  const vendorMatch = vendorId ? { _id: vendorId } : {}
+  const childMatch: Record<string, unknown> = vendorId ? { vendorId } : {}
 
   const { today, soon } = expiryWindow()
 

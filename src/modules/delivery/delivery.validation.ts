@@ -369,6 +369,19 @@ export const receiptScanQuerySchema = z.object({
 })
 export type ReceiptScanQuery = z.infer<typeof receiptScanQuerySchema>
 
+/**
+ * A barcode read off a printed manifest, asking "which trip is this sheet?".
+ *
+ * The third scan shape in this module and the third endpoint, for the reason
+ * the other two give: the paper says which question is being asked, and one
+ * endpoint answering all three would make a scan mean whatever page happened
+ * to be open.
+ */
+export const tripScanQuerySchema = z.object({
+  code: z.string().trim().min(1, 'Nothing was scanned.').max(80),
+})
+export type TripScanQuery = z.infer<typeof tripScanQuerySchema>
+
 /** The viewer's own calendar day — see `getTripStats`. */
 export const statsQuerySchema = z.object({
   today: z

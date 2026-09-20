@@ -1,4 +1,5 @@
 import type { Request, Response } from 'express'
+import { getObjectStream } from '../../config/r2'
 import { AppError } from '../../utils/app-error'
 import { sendResponse } from '../../utils/send-response'
 import type { UserDocument } from '../user/user.model'
@@ -22,6 +23,11 @@ import {
   listReceivableFinalBills,
   updateFinalBill,
 } from './final-bill.service'
+import {
+  getLabourReceivable,
+  listLabourReceivables,
+  listReceivableLabourCsds,
+} from './labour-receivable.service'
 import { getCashSummary } from './cash.service'
 import { getOverview, profitAndLoss } from './report.service'
 import type {
@@ -33,6 +39,7 @@ import type {
   ListAdvancesQuery,
   ListEntriesQuery,
   ListFinalBillsQuery,
+  ListLabourReceivablesQuery,
   OverviewQuery,
   ProfitLossQuery,
   TripOptionsQuery,
@@ -41,8 +48,10 @@ import type {
   UpdateWalletInput,
   VendorBillDetailQuery,
   VendorBillsQuery,
+  VoucherBody,
   WalletInput,
 } from './accounts.validation'
+import { attachVoucher, clearVoucher, findVoucher } from './voucher.service'
 import { getVendorBillDetail, listTripOptions, listVendorBills } from './vendor-bill.service'
 import {
   createWallet,
@@ -168,6 +177,62 @@ export async function removeEntry(req: Request, res: Response): Promise<void> {
   sendResponse(res, { statusCode: 200, message: `${result.entryNumber} deleted`, data: result })
 }
 
+/**
+ * The voucher or invoice behind an entry, arriving off a disk or off the
+ * scanner on this desk.
+ *
+ * A separate call from the one that wrote the entry, because the object key
+ * contains the entry id — the ordering a gate pass's three calls and a
+ * vehicle's photo both have.
+ */
+export async function postEntryVoucher(req: Request, res: Response): Promise<void> {
+  const file = req.file
+  if (!file) {
+    throw new AppError(400, 'Choose or scan the voucher to upload.')
+  }
+
+  const body = (req.validated?.body ?? { pageCount: null }) as VoucherBody
+
+  const entry = await attachVoucher(idFrom(req), file, body.pageCount ?? null, actorFrom(req))
+  sendResponse(res, {
+    statusCode: 200,
+    message: `Voucher attached to ${entry.entryNumber}`,
+    data: entry,
+  })
+}
+
+export async function deleteEntryVoucher(req: Request, res: Response): Promise<void> {
+  const entry = await clearVoucher(idFrom(req))
+  sendResponse(res, {
+    statusCode: 200,
+    message: `Voucher removed from ${entry.entryNumber}`,
+    data: entry,
+  })
+}
+
+/**
+ * Streams the voucher.
+ *
+ * The bucket never serves this object — a voucher carries a supplier's name, an
+ * amount and often a signature — so the route re-checks authentication and role
+ * and pipes the bytes itself, exactly as a gate pass scan, a vendor document
+ * and a signed challan copy do.
+ */
+export async function getEntryVoucherFile(req: Request, res: Response): Promise<void> {
+  const ref = await findVoucher(idFrom(req))
+  const object = await getObjectStream(ref.key)
+
+  res.setHeader('Content-Type', object.contentType ?? ref.mimeType)
+  res.setHeader('Cache-Control', 'private, no-store')
+  res.setHeader('Content-Disposition', `inline; filename="${ref.originalName.replace(/"/g, '')}"`)
+  if (object.contentLength !== undefined) {
+    res.setHeader('Content-Length', String(object.contentLength))
+  }
+
+  object.body.on('error', () => res.destroy())
+  object.body.pipe(res)
+}
+
 export async function getExpenseNames(req: Request, res: Response): Promise<void> {
   const { q } = queryOf<ExpenseNamesQuery>(req)
   sendResponse(res, { statusCode: 200, message: 'Expense names retrieved', data: await listExpenseNames(q) })
@@ -257,3 +322,37 @@ export async function removeFinalBill(req: Request, res: Response): Promise<void
   sendResponse(res, { statusCode: 200, message: `Final bill for ${result.label} deleted`, data: result })
 }
 
+
+// ---------------------------------------------------------------------------
+// Walton labour bill receivables
+// ---------------------------------------------------------------------------
+
+export async function getLabourReceivables(req: Request, res: Response): Promise<void> {
+  const query = queryOf<ListLabourReceivablesQuery>(req)
+  const { records, totals, totalPages } = await listLabourReceivables(query)
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Labour bill receivables retrieved',
+    data: { records, totals },
+    // Paged in memory, so the page count comes back with the answer rather
+    // than from a separate count.
+    meta: { page: query.page, limit: query.limit, total: totals.total, totalPages },
+  })
+}
+
+export async function getLabourReceivableById(req: Request, res: Response): Promise<void> {
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Labour bill receivable retrieved',
+    data: await getLabourReceivable(idFrom(req)),
+  })
+}
+
+export async function getLabourReceivableOptions(_req: Request, res: Response): Promise<void> {
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Receivable labour bill CSDs retrieved',
+    data: await listReceivableLabourCsds(),
+  })
+}

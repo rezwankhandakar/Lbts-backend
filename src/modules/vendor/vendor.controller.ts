@@ -45,8 +45,10 @@ import {
   updateVehicle,
 } from './vehicle.service'
 import { getVendorTripDetail, listVendorTrips } from '../delivery/delivery.vendor-trips'
+import { getVendorTripFigures } from '../delivery/delivery.vendor-dashboard'
 import { tripAdvanceEntries, tripAdvancesFor, vendorMonthlyBill } from '../accounts/vendor-trip-money'
 import type { VendorTripsQuery } from '../delivery/delivery.validation'
+import { VENDOR_DASHBOARD_MONTHS, VENDOR_DASHBOARD_TRIPS } from './vendor.constants'
 import { listActivity } from './vendor.activity'
 import { ownVendorIdOf } from './vendor.access'
 import {
@@ -79,6 +81,7 @@ import type {
   UpdateVehicleInput,
   UpdateVendorInput,
   VehicleStatusInput,
+  VendorDashboardQuery,
   VendorOptionsQuery,
   VendorStatusInput,
   VendorTripParam,
@@ -194,6 +197,72 @@ export async function getActivity(req: Request, res: Response): Promise<void> {
     statusCode: 200,
     message: 'Activity retrieved',
     data: await listActivity(id, query.limit),
+  })
+}
+
+/**
+ * The signed-in vendor's dashboard: their trips, their money and their fleet,
+ * in **one request**.
+ *
+ * No id anywhere, like `GET /vendors/me` — the vendor is read off the profile
+ * the auth middleware loaded, so a Vendor account never sends one and has
+ * nothing to tamper with. `ownVendorIdOf` is also what makes this a vendor
+ * account's endpoint alone: a staff account is told plainly that "my vendor" is
+ * not a question their account has an answer to, and the vendor page, which
+ * already carries a Trips tab and an overview, is where they go instead.
+ *
+ * One request rather than four, because this is the first screen a vendor sees
+ * and the instance behind it may have been asleep for fifteen minutes — four
+ * calls there are four cold starts stacked one behind the other. The three
+ * services it fans out to are the ones the Trips tab, the Vendor Bills page and
+ * the vendor list already use, so the dashboard can never quote a figure its
+ * own tabs would disagree with.
+ */
+export async function getVendorDashboard(req: Request, res: Response): Promise<void> {
+  const { today } = req.validated?.query as VendorDashboardQuery
+  const actor = actorFrom(req)
+  const id = ownVendorIdOf(actor)
+
+  const recent: VendorTripsQuery = {
+    page: 1,
+    limit: VENDOR_DASHBOARD_TRIPS,
+    search: '',
+    status: 'all',
+    bill: 'all',
+  }
+
+  /**
+   * The month the viewer's own day falls in, as a range `vendorMonthlyBill`
+   * will round out to the whole month anyway — paid and due only mean anything
+   * per whole month, because a `VendorPayment` names a month and never a trip.
+   * Naming both ends keeps that intent readable at the call site.
+   */
+  const monthStart = `${today.slice(0, 7)}-01`
+
+  const [vendor, figures, bill, fleet, trips] = await Promise.all([
+    getVendor(id, actor),
+    getVendorTripFigures(id, today, VENDOR_DASHBOARD_MONTHS),
+    vendorMonthlyBill(id, monthStart, today),
+    getVendorStats(actor),
+    listVendorTrips(id, recent),
+  ])
+
+  const advances = await tripAdvancesFor(trips.records.map((record) => record.id))
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Dashboard retrieved',
+    data: {
+      vendor,
+      figures,
+      bill,
+      fleet,
+      recentTrips: trips.records.map((record) => ({
+        ...record,
+        bill: (record.tripRent ?? 0) + (record.labourBill ?? 0),
+        advance: advances.get(record.id) ?? 0,
+      })),
+    },
   })
 }
 

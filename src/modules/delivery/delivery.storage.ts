@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import sharp from 'sharp'
-import { deleteObject, putObject, requireStorage } from '../../config/r2'
+import { deleteObject, getObjectStream, putObject, requireStorage } from '../../config/r2'
 import { AppError } from '../../utils/app-error'
 import { maxReceivedCopyBytesFor } from './delivery.constants'
 import type { ReceivedCopyMimeType } from './delivery.constants'
@@ -236,6 +236,28 @@ export async function uploadReceivedCopy(
     pageCount: input.pageCount,
     uploadedAt: new Date(),
   }
+}
+
+/**
+ * A stored signed copy's bytes, whole.
+ *
+ * For the one caller that has to *assemble* copies rather than hand one to a
+ * browser: the Walton Labour Bill merges a month's signed copies into a single
+ * PDF, and pdf-lib parses a cross-reference table at the end of each file, so
+ * there is nothing to stream into. Everything a browser reads still goes
+ * through `getReceivedCopyFile`, which pipes the stream and never buffers it.
+ */
+export async function readReceivedCopy(key: string): Promise<Uint8Array> {
+  const object = await getObjectStream(key)
+  const chunks: Buffer[] = []
+
+  for await (const chunk of object.body) {
+    // A Node readable in non-object mode yields Buffers; its declared type is
+    // wider than that, so it is narrowed here rather than cast.
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk), 'binary'))
+  }
+
+  return new Uint8Array(Buffer.concat(chunks))
 }
 
 /**

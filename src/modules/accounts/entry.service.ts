@@ -19,11 +19,14 @@ import {
 } from './accounts.constants'
 import type { EntryKind } from './accounts.constants'
 import { EntryModel, FinalBillModel } from './accounts.model'
+import { deleteVoucher } from './accounts.storage'
 import type { Entry, EntryDocument } from './accounts.model'
 import { finalBillLabel, serializeEntries, serializeEntry } from './accounts.serializer'
+import { findLabourCsdSection } from './labour-receivable.service'
 import type { EntryRecord } from './accounts.serializer'
 import {
   receivedAgainstFinalBill,
+  receivedAgainstLabourCsd,
   refreshAdvanceSettlement,
   refreshFinalBillReceipts,
   settledAgainstAdvance,
@@ -99,6 +102,9 @@ async function resolveFields(input: EntryInput, existing: EntryDocument | null):
     partyPhone: '',
     source: null,
     finalBillId: null,
+    labourBillId: null,
+    labourCsdKey: '',
+    labourCsd: '',
     expenseName: '',
     purpose: '',
     advanceId: null,
@@ -115,8 +121,9 @@ async function resolveFields(input: EntryInput, existing: EntryDocument | null):
 
   if ('walletId' in input) {
     const wallet = await walletFor(input.walletId)
-    const againstFinalBill = input.kind === 'Deposit' && Boolean(input.finalBillId)
-    if (requiresCashWallet(input.kind, againstFinalBill) && wallet.kind !== 'Cash') {
+    const againstWaltonBill =
+      input.kind === 'Deposit' && Boolean(input.finalBillId || input.labourBillId)
+    if (requiresCashWallet(input.kind, againstWaltonBill) && wallet.kind !== 'Cash') {
       throw notCash(input.kind, wallet.name)
     }
     fields.walletId = wallet._id
@@ -124,9 +131,26 @@ async function resolveFields(input: EntryInput, existing: EntryDocument | null):
 
   switch (input.kind) {
     case 'Deposit': {
-      // Added into cash as a plain deposit; one recorded against a final bill is a Walton payment.
-      fields.source = input.finalBillId ? 'Walton Bill' : 'Other'
+      // Added into cash as a plain deposit; one recorded against a Walton bill
+      // — the final bill, or one CSD of a month's labour bill — is a payment.
+      fields.source = input.finalBillId || input.labourBillId ? 'Walton Bill' : 'Other'
       fields.party = input.party
+
+      if (input.labourBillId) {
+        const { bill, section } = await findLabourCsdSection(input.labourBillId, input.labourCsd)
+        const received = await receivedAgainstLabourCsd(bill._id, section.key, existing?._id)
+        const left = outstandingOf(section.totalAmount, received)
+        if (input.amount > left) {
+          throw new AppError(
+            409,
+            `${section.label} on ${bill.billNumber} has ${taka(left)} left to receive, so ${taka(input.amount)} cannot be recorded against it.`,
+          )
+        }
+        fields.labourBillId = bill._id
+        fields.labourCsdKey = section.key
+        fields.labourCsd = section.csd
+      }
+
       if (input.finalBillId) {
         const bill = await FinalBillModel.findById(input.finalBillId)
         if (!bill) {
@@ -331,6 +355,10 @@ export async function updateEntry(id: string, input: UpdateEntryInput, actor: Us
  * An entry is removed outright; the books are what the remaining entries say.
  * The one refusal is an advance with settlements recorded against it — those
  * would be returns of money nobody was ever given.
+ *
+ * Its voucher goes with it, and in that order: the record first, then the
+ * object, so the worst outcome of a failure is an orphan in the bucket rather
+ * than a file nothing points at being kept because the delete was refused.
  */
 export async function deleteEntry(id: string): Promise<{ id: string; entryNumber: string }> {
   const entry = await findEntry(id)
@@ -342,8 +370,15 @@ export async function deleteEntry(id: string): Promise<{ id: string; entryNumber
     )
   }
 
+  const voucherKey = entry.voucher?.key ?? null
+
   await entry.deleteOne()
   await refreshLinks(entry)
+
+  if (voucherKey) {
+    await deleteVoucher(voucherKey)
+  }
+
   return { id, entryNumber: entry.entryNumber }
 }
 

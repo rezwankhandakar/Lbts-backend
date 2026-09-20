@@ -253,6 +253,32 @@ export async function getTrip(id: string): Promise<TripRecord> {
   return serialize(await findTripOr404(id))
 }
 
+/**
+ * One barcode read off a **printed manifest**: which trip is this sheet?
+ *
+ * The third scan question in this module, and deliberately its own endpoint
+ * for the same reason the other two are: `challan-candidates/scan` means "put
+ * this on a lorry", `receipts/scan` means "this came back signed", and this
+ * one means "open this trip". A scan meaning different things depending on
+ * which page was open is exactly the sort of thing somebody discovers at a
+ * gate.
+ *
+ * The manifest carries the trip number in its **stored** form, which is unique
+ * across the collection and indexed, so this is one exact indexed read and
+ * never a search. The code is normalised rather than refused — a scanner on a
+ * machine with Caps Lock quirks types the same number in the wrong case.
+ */
+export async function findTripByScan(code: string): Promise<TripRecord> {
+  const tripNumber = code.trim().toUpperCase().replace(/\s+/g, '')
+  const trip = await DeliveryModel.findOne({ tripNumber })
+
+  if (!trip) {
+    throw new AppError(404, `No trip carries the barcode ${tripNumber}.`)
+  }
+
+  return serialize(trip)
+}
+
 export interface TripStats {
   total: number
   /** Trips with a challan still waiting for its signed copy. */

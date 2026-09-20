@@ -24,6 +24,7 @@ import {
   TripOverageError,
   createDriverForTrip,
   createTrip,
+  findTripByScan,
   getChallanDispatch,
   getTrip,
   getTripStats,
@@ -46,6 +47,7 @@ import type {
   StatsQuery,
   TripBillInput,
   TripChallanParams,
+  TripScanQuery,
   UpdateTripInput,
   VehicleSearchQuery,
 } from './delivery.validation'
@@ -142,6 +144,23 @@ export async function getTripOne(req: Request, res: Response): Promise<void> {
     statusCode: 200,
     message: 'Trip retrieved',
     data: await getTrip(idFrom(req)),
+  })
+}
+
+/**
+ * A barcode read off a printed manifest: which trip is this sheet?
+ *
+ * The answer is the whole trip rather than an id, because whoever scanned a
+ * manifest is about to open it and a second round trip on a sleeping Render
+ * instance is a second cold start.
+ */
+export async function getTripScan(req: Request, res: Response): Promise<void> {
+  const query = req.validated?.query as TripScanQuery
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Trip retrieved',
+    data: await findTripByScan(query.code),
   })
 }
 

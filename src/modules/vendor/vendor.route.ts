@@ -36,6 +36,7 @@ import {
   getVehicleHistory,
   getVehicleOne,
   getVehicles,
+  getVendorDashboard,
   getVendorTrip,
   getVendorTrips,
   getVendors,
@@ -79,6 +80,7 @@ import {
   updateVendorSchema,
   vehicleStatusSchema,
   vendorOptionsQuerySchema,
+  vendorDashboardQuerySchema,
   vendorStatusSchema,
 } from './vendor.validation'
 
@@ -147,6 +149,19 @@ vendors.get('/options', validateRequest({ query: vendorOptionsQuerySchema }), ge
  * impossible to point at somebody else's.
  */
 vendors.get('/me', getMyVendor)
+/**
+ * The vendor account's own dashboard — trips, money and fleet in one answer.
+ *
+ * Under `/me` for the reason the record above it is: no id crosses the wire at
+ * all, so there is nothing for a crafted request to point at. Declared here,
+ * before `/:id/…`, or Express matches `me` as a vendor id and the parameter
+ * schema refuses it with an unhelpful 400.
+ */
+vendors.get(
+  '/me/dashboard',
+  validateRequest({ query: vendorDashboardQuerySchema }),
+  getVendorDashboard,
+)
 
 vendors.get('/', validateRequest({ query: listVendorsQuerySchema }), getVendors)
 vendors.post('/', canManage, validateRequest({ body: createVendorSchema }), postVendor)

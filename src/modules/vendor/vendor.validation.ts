@@ -417,6 +417,28 @@ export const activityQuerySchema = z.object({
 })
 export type ActivityQuery = z.infer<typeof activityQuerySchema>
 
+/**
+ * The vendor dashboard, which asks for exactly one thing: the viewer's own
+ * calendar day.
+ *
+ * A trip date is a **day**, and the server's UTC midnight is six hours out of
+ * step with Dhaka's — so "trips today" worked out from the server's clock would
+ * be wrong for the first six hours of every working day. The same reasoning
+ * `GET /deliveries/stats` and `GET /accounts/overview` both take the day from
+ * the browser for.
+ *
+ * There is no vendor id here, and that is the point: the handler reads it off
+ * the signed-in profile, so this endpoint carries nothing a request could aim
+ * at somebody else's vendor.
+ */
+export const vendorDashboardQuerySchema = z.object({
+  today: z
+    .string()
+    .regex(/^\d{4}-\d{2}-\d{2}$/)
+    .default(() => new Date().toISOString().slice(0, 10)),
+})
+export type VendorDashboardQuery = z.infer<typeof vendorDashboardQuerySchema>
+
 /** The vendor selector on a form: id, code and name, and nothing heavier. */
 export const vendorOptionsQuerySchema = z.object({
   search: z.string().trim().max(120).default(''),

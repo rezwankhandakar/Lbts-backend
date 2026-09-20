@@ -5,6 +5,7 @@ import {
   ENTRY_KINDS,
   MAX_ACCOUNT_AMOUNT,
   SETTLEMENT_STATUSES,
+  VOUCHER_MIME_TYPES,
   WALLET_KINDS,
 } from './accounts.constants'
 
@@ -74,6 +75,28 @@ const periodSchema = new Schema(
 )
 
 /**
+ * The voucher or invoice behind an entry, as stored.
+ *
+ * MongoDB holds the key and never the bytes, exactly as it does for a gate
+ * pass scan, a vendor compliance document and a signed challan copy. The
+ * object is private and `GET /accounts/entries/:id/voucher` is its only read
+ * path.
+ */
+const voucherSchema = new Schema(
+  {
+    key: { type: String, required: true },
+    mimeType: { type: String, enum: VOUCHER_MIME_TYPES, required: true },
+    size: { type: Number, required: true, min: 1 },
+    originalName: { type: String, default: '', maxlength: 200 },
+    /** Reported by whatever produced the file; never guessed. */
+    pageCount: { type: Number, default: null, min: 1 },
+    uploadedAt: { type: Date, required: true },
+    uploadedBy: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+  },
+  { _id: false },
+)
+
+/**
  * One movement of money. One collection rather than one per kind, because the
  * questions asked of it — a wallet's balance, a day's cash book, a month's
  * spending — cross every kind, and a union of eight collections in front of
@@ -106,6 +129,19 @@ const entrySchema = new Schema(
     // Deposit
     source: { type: String, enum: [...DEPOSIT_SOURCES, null], default: null },
     finalBillId: { type: Schema.Types.ObjectId, ref: 'WaltonFinalBill', default: null },
+    /**
+     * A Walton payment against **one CSD** of a month's labour bill.
+     *
+     * Two fields rather than one id, because a labour bill has no record per
+     * CSD to point at: the sheet splits itself by whatever CSD each row's gate
+     * pass carries, so a section is a group rather than a document. The bill
+     * and the CSD's `comparisonKey` together are what a receipt is against, and
+     * what `receivedAgainstLabourCsd` sums over.
+     */
+    labourBillId: { type: Schema.Types.ObjectId, ref: 'WaltonLabourBill', default: null },
+    labourCsdKey: { type: String, default: '' },
+    /** The CSD as the sheet writes it, so a receipt reads without a join. */
+    labourCsd: { type: String, default: '' },
 
     /**
      * What an expense was for, typed by whoever recorded it — there is no list
@@ -130,6 +166,14 @@ const entrySchema = new Schema(
     tripId: { type: Schema.Types.ObjectId, ref: 'Delivery', default: null },
     trip: { type: tripCopySchema, default: null },
     period: { type: periodSchema, default: null },
+
+    /**
+     * The paper behind this entry — a fuel bill, a repair invoice, a signed
+     * receipt. Optional everywhere: an entry is the record of money moving,
+     * and holding one back until somebody finds the scanner is how a cash book
+     * stops being written up at all.
+     */
+    voucher: { type: voucherSchema, default: null },
 
     /**
      * The browser's key for this entry, made when the form opened. A second
@@ -157,6 +201,8 @@ entrySchema.index({ kind: 1, 'period.year': 1, 'period.month': 1 })
 /** Settlements of one advance, payments of one final bill. */
 entrySchema.index({ advanceId: 1 })
 entrySchema.index({ finalBillId: 1 })
+/** Payments received against one CSD of one month's labour bill. */
+entrySchema.index({ labourBillId: 1, labourCsdKey: 1 })
 /** Open advances. */
 entrySchema.index({ kind: 1, settlementStatus: 1, date: -1 })
 entrySchema.index({ kind: 1, expenseName: 1, date: -1 })

@@ -77,3 +77,49 @@ export function receivedAgainstFinalBill(
     ...(exceptEntryId ? { _id: { $ne: oid(exceptEntryId) } } : {}),
   })
 }
+
+/**
+ * What has arrived against **one CSD** of a month's labour bill.
+ *
+ * Nothing is written back, unlike a final bill's `receivedAmount`: a labour
+ * bill has no record per CSD to write onto — the sheet splits itself by the CSD
+ * on each row — so what a section is owed and what has arrived against it are
+ * both worked out at read time. A month is one sheet and a handful of sections,
+ * so that costs one aggregation rather than a collection to keep in step.
+ */
+export function receivedAgainstLabourCsd(
+  labourBillId: Types.ObjectId | string,
+  csdKey: string,
+  exceptEntryId?: IdLike,
+): Promise<number> {
+  return sumAmount({
+    labourBillId: oid(labourBillId),
+    labourCsdKey: csdKey,
+    kind: 'Deposit',
+    ...(exceptEntryId ? { _id: { $ne: oid(exceptEntryId) } } : {}),
+  })
+}
+
+/** What has arrived against every CSD of a set of labour bills, keyed `billId|csdKey`. */
+export async function receiptsByLabourCsd(
+  labourBillIds: readonly (Types.ObjectId | string)[],
+): Promise<Map<string, number>> {
+  if (labourBillIds.length === 0) {
+    return new Map()
+  }
+
+  const rows = await EntryModel.aggregate<{
+    _id: { billId: Types.ObjectId; csdKey: string }
+    total: number
+  }>([
+    { $match: { kind: 'Deposit', labourBillId: { $in: labourBillIds.map(oid) } } },
+    {
+      $group: {
+        _id: { billId: '$labourBillId', csdKey: { $ifNull: ['$labourCsdKey', ''] } },
+        total: { $sum: '$amount' },
+      },
+    },
+  ])
+
+  return new Map(rows.map((row) => [`${String(row._id.billId)}|${row._id.csdKey}`, row.total]))
+}

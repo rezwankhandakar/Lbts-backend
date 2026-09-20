@@ -2,6 +2,8 @@ import type { Types } from 'mongoose'
 import { AppError } from '../../utils/app-error'
 import { BillModel } from '../bill/bill.model'
 import { DeliveryModel } from '../delivery/delivery.model'
+import { LabourBillModel } from '../labour-bill/labour-bill.model'
+import { labourCsdSummaries } from '../labour-bill/labour-bill.service'
 import {
   MAX_REPORT_MONTHS,
   marginOf,
@@ -20,16 +22,30 @@ import { EntryModel, FinalBillModel } from './accounts.model'
 import { serializeEntries } from './accounts.serializer'
 import type { EntryRecord } from './accounts.serializer'
 import { getCashSummary } from './cash.service'
+import { listReceivableLabourCsds } from './labour-receivable.service'
 import type { CashFigures } from './cash.service'
 import type { WalletRecord } from './wallet.service'
 
 /**
  * Profit and loss, and the overview page.
  *
- * **Income is the Walton final bill and nothing else.** The Excel bill is what
- * was asked for and the audit decides what is paid, so a month without its
- * final bill has no income yet rather than a guessed one — it is listed as
- * pending, with what its Excel bills asked for, and left out of profit.
+ * **Income is what Walton has been billed: the final bill, plus the month's
+ * labour bill.** They are the two claims the office makes, and neither stands
+ * for the other — the final bill is the audited figure for a unit's carriage,
+ * the labour bill is what the handling came to — so both count and each is
+ * reported on its own line.
+ *
+ * The Excel bill is not income: it is what was *asked for*, and the audit
+ * decides what is paid, so a month without its final bill has no carriage
+ * income yet rather than a guessed one — it is listed as pending, with what its
+ * Excel bills asked for, and left out of profit. The labour bill needs no such
+ * wait, because nobody audits it: the office works out what the handling cost
+ * row by row, and that figure **is** the claim.
+ *
+ * Labour income counts the **CSD sections only**. Rows still waiting for a Trip
+ * DO belong to no CSD, so nobody has been billed for them yet; they join the
+ * month's income the moment their Trip DO is set, which is the same self-
+ * correcting rule the receivable page follows.
  *
  * **Costs are accrued, not paid.** A trip's rent and labour bill count in the
  * month the trip ran, whether or not the vendor has been paid; an office
@@ -44,7 +60,18 @@ function labelled(period: Period): PeriodLabelled {
 }
 
 export interface ProfitLossMonth extends PeriodLabelled {
+  /** The two claims together: the final bill plus the month's labour bill. */
   income: number
+  /** Walton's audited figure for the month's units. */
+  finalBillIncome: number
+  /**
+   * What the month's labour bill billed, its CSD sections only.
+   *
+   * Named apart from `labourBill` below, which is the **cost** of a vendor's
+   * labour on a trip. Two different things that both read "labour": one is
+   * charged to Walton, the other is paid to a vendor.
+   */
+  waltonLabourIncome: number
   tripRent: number
   labourBill: number
   officeExpense: number
@@ -54,9 +81,13 @@ export interface ProfitLossMonth extends PeriodLabelled {
   tripCount: number
   blankBills: number
   finalBillCount: number
+  /** Whether a labour bill exists for the month, so an income of nothing reads honestly. */
+  labourBillCount: number
   /** Units with an Excel bill this month and no final bill yet. */
   pendingUnits: string[]
   pendingSubmitted: number
+  /** Labour rows with no Trip DO, so their charge is not income yet. */
+  pendingLabour: number
 }
 
 export interface ProfitLossReport {
@@ -88,9 +119,10 @@ export async function profitAndLoss(from: Period, to: Period): Promise<ProfitLos
   const end = periodRange(to).end
   const byMonth = { year: { $year: '$tripDate' }, month: { $month: '$tripDate' } }
 
-  const [finalBills, excelBills, tripMonths, vendorCosts, expenseRows] = await Promise.all([
+  const [finalBills, excelBills, labourBills, tripMonths, vendorCosts, expenseRows] = await Promise.all([
     FinalBillModel.find(monthClause(months)).select('year month unit unitKey finalAmount').lean(),
     BillModel.find(monthClause(months)).select('year month unit unitKey totalAmount').lean(),
+    LabourBillModel.find(monthClause(months)).select('year month').lean(),
     DeliveryModel.aggregate<{
       _id: Period
       tripCount: number
@@ -157,6 +189,28 @@ export async function profitAndLoss(from: Period, to: Period): Promise<ProfitLos
   const finalBySlot = new Set(finalBills.map((bill) => `${bill.year}-${bill.month}-${bill.unitKey}`))
   const tripsBy = new Map(tripMonths.map((row) => [periodKey(row._id), row]))
 
+  /**
+   * What each month's labour bill billed, and what it has not billed yet.
+   *
+   * Read off the sheet by CSD rather than taken from the bill's stored total,
+   * because the pending section is in that total and is not income: nobody has
+   * been billed for a row whose Trip DO is unset. One aggregation for the whole
+   * range.
+   */
+  const labourSections = await labourCsdSummaries(labourBills.map((bill) => bill._id))
+  const labourBy = new Map<string, { income: number; pending: number; count: number }>()
+  for (const bill of labourBills) {
+    const key = periodKey(bill)
+    const sections = labourSections.get(String(bill._id)) ?? []
+    const row = labourBy.get(key) ?? { income: 0, pending: 0, count: 0 }
+    row.income += sections
+      .filter((section) => !section.isPending)
+      .reduce((total, section) => total + section.totalAmount, 0)
+    row.pending += sections.find((section) => section.isPending)?.totalAmount ?? 0
+    row.count += 1
+    labourBy.set(key, row)
+  }
+
   const monthRows: ProfitLossMonth[] = months.map((period) => {
     const key = periodKey(period)
     const trips = tripsBy.get(key)
@@ -165,8 +219,12 @@ export async function profitAndLoss(from: Period, to: Period): Promise<ProfitLos
       (bill) =>
         bill.year === period.year && bill.month === period.month && !finalBySlot.has(`${bill.year}-${bill.month}-${bill.unitKey}`),
     )
+    const labour = labourBy.get(key)
+    const finalBillIncome = finals.reduce((total, bill) => total + bill.finalAmount, 0)
+    const waltonLabourIncome = labour?.income ?? 0
+
     const figures = {
-      income: finals.reduce((total, bill) => total + bill.finalAmount, 0),
+      income: finalBillIncome + waltonLabourIncome,
       tripRent: trips?.tripRent ?? 0,
       labourBill: trips?.labourBill ?? 0,
       officeExpense: expenseRows
@@ -176,14 +234,18 @@ export async function profitAndLoss(from: Period, to: Period): Promise<ProfitLos
     return {
       ...labelled(period),
       ...figures,
+      finalBillIncome,
+      waltonLabourIncome,
       totalCost: totalCostOf(figures),
       profit: profitOf(figures),
       margin: marginOf(figures),
       tripCount: trips?.tripCount ?? 0,
       blankBills: trips?.blankBills ?? 0,
       finalBillCount: finals.length,
+      labourBillCount: labour?.count ?? 0,
       pendingUnits: [...new Set(pending.map((bill) => bill.unit))],
       pendingSubmitted: Math.round(pending.reduce((total, bill) => total + bill.totalAmount, 0)),
+      pendingLabour: Math.round(labour?.pending ?? 0),
     }
   })
 
@@ -238,10 +300,14 @@ export async function profitAndLoss(from: Period, to: Period): Promise<ProfitLos
       totalCost: totalCostOf(summaryFigures),
       profit: profitOf(summaryFigures),
       margin: marginOf(summaryFigures),
+      finalBillIncome: add((row) => row.finalBillIncome),
+      waltonLabourIncome: add((row) => row.waltonLabourIncome),
       tripCount: add((row) => row.tripCount),
       blankBills: add((row) => row.blankBills),
       finalBillCount: add((row) => row.finalBillCount),
+      labourBillCount: add((row) => row.labourBillCount),
       pendingSubmitted: add((row) => row.pendingSubmitted),
+      pendingLabour: add((row) => row.pendingLabour),
       pendingSlots: pendingSlots.size,
     },
     incomeByUnit: [...units.values()]
@@ -285,16 +351,29 @@ export interface AccountsOverview {
   /**
    * Cash alone — the wallets that pay vendors, advances and expenses. Bank and
    * mobile wallets are not added in; they are on the Cash Book and Settings.
+   *
+   * The headline figures are the **calendar year to date** and the month
+   * inside it, never all time: a running total of every taka since the books
+   * were opened only ever grows, so it stops being a figure anybody acts on.
+   * A year is the period the office closes against, and the Cash page is
+   * where a longer range is asked for.
    */
   cash: {
     wallets: WalletRecord[]
     balance: number
-    allTime: CashFigures
+    /** 1 January of `year` to the end of the current month. */
+    thisYear: CashFigures
     thisMonth: CashFigures
+    year: number
   }
   vendorDue: { total: number; vendors: number; blankBills: number }
   advances: { outstanding: number; count: number }
-  receivable: { outstanding: number; count: number }
+  /**
+   * What Walton still owes, both claims together — final bills and labour bill
+   * CSDs. `count` is how many of each are still open, so one figure does not
+   * hide half the receivable.
+   */
+  receivable: { outstanding: number; count: number; finalBills: number; labourCsds: number }
   profitLoss: ProfitLossMonth
   trend: ProfitLossMonth[]
   pendingFinalBills: number
@@ -309,8 +388,13 @@ export async function getOverview(today: string): Promise<AccountsOverview> {
   const current: Period = { year: Number(today.slice(0, 4)), month: Number(today.slice(5, 7)) }
   const trendFrom = periodFromIndex(periodIndex(current) - 5)
 
-  const [cash, vendorDue, advances, receivable, report, recent] = await Promise.all([
-    getCashSummary(current, current, 'month'),
+  const yearStart: Period = { year: current.year, month: 1 }
+
+  const [cash, vendorDue, advances, receivable, labourReceivable, report, recent] = await Promise.all([
+    // January to this month, by month: the range totals are the year to date
+    // and the current month is its own row, so one summary answers both
+    // figures rather than two aggregations answering one each.
+    getCashSummary(yearStart, current, 'month'),
     vendorDueTotals(),
     EntryModel.aggregate<{ outstanding: number; count: number }>([
       { $match: { kind: 'Advance', settlementStatus: { $in: ['Open', 'Partial'] } } },
@@ -323,6 +407,9 @@ export async function getOverview(today: string): Promise<AccountsOverview> {
       },
     ]),
     FinalBillModel.find({ paymentStatus: { $in: ['Open', 'Partial'] } }).select('finalAmount receivedAmount').lean(),
+    // Derived rather than stored, so it is a read of the labour sheets — see
+    // `labour-receivable.service.ts`.
+    listReceivableLabourCsds(),
     profitAndLoss(trendFrom, current),
     EntryModel.find({}).sort({ date: -1, createdAt: -1 }).limit(8),
   ])
@@ -333,14 +420,19 @@ export async function getOverview(today: string): Promise<AccountsOverview> {
     cash: {
       wallets: cash.wallets.filter((wallet) => wallet.isActive || wallet.balance !== 0),
       balance: cash.balance,
-      allTime: cash.allTime,
-      thisMonth: cash.range.totals,
+      thisYear: cash.range.totals,
+      thisMonth: cash.range.rows.find((row) => row.key === periodKey(current)) ?? cash.range.totals,
+      year: current.year,
     },
     vendorDue,
     advances: { outstanding: advances[0]?.outstanding ?? 0, count: advances[0]?.count ?? 0 },
     receivable: {
-      outstanding: receivable.reduce((total, bill) => total + outstandingOf(bill.finalAmount, bill.receivedAmount ?? 0), 0),
-      count: receivable.length,
+      outstanding:
+        receivable.reduce((total, bill) => total + outstandingOf(bill.finalAmount, bill.receivedAmount ?? 0), 0) +
+        labourReceivable.reduce((total, csd) => total + csd.outstanding, 0),
+      count: receivable.length + labourReceivable.length,
+      finalBills: receivable.length,
+      labourCsds: labourReceivable.length,
     },
     profitLoss: report.months[report.months.length - 1],
     trend: report.months,

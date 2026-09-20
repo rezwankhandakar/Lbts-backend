@@ -112,6 +112,24 @@ const envSchema = z.object({
   ),
 
   /**
+   * The VOUCHER or INVOICE behind one Accounts entry — a fuel bill, a repair
+   * invoice, a receipt signed for an advance.
+   *
+   * Private, like every document prefix but the avatars: a voucher carries a
+   * supplier's name, an amount and often a signature, and it belongs to books
+   * only three roles out of five may read. Nothing under this prefix is served
+   * from `R2_PUBLIC_BASE_URL`; the API streams it at
+   * GET /api/v1/accounts/entries/:id/voucher behind the module's own auth and
+   * role checks. Its own prefix rather than a shared one, because the bucket
+   * can only give two kinds of document different lifecycle rules when they sit
+   * under different keys — and a voucher is kept as long as the books are.
+   */
+  R2_ACCOUNTS_PREFIX: z.preprocess(
+    blank,
+    z.string().trim().min(1).default('accounts-vouchers'),
+  ),
+
+  /**
    * Gemini, which helps choose between location candidates this server has
    * already narrowed down. Optional in exactly the way R2 is: unconfigured,
    * the API boots and everything works, and location resolution simply stops
@@ -187,12 +205,13 @@ const r2 =
         vendorKeyPrefix: trimSlashes(parsed.data.R2_VENDOR_PREFIX),
         vendorDocumentKeyPrefix: trimSlashes(parsed.data.R2_VENDOR_DOCUMENT_PREFIX),
         deliveryKeyPrefix: trimSlashes(parsed.data.R2_DELIVERY_PREFIX),
+        accountsKeyPrefix: trimSlashes(parsed.data.R2_ACCOUNTS_PREFIX),
       }
     : null
 
 if (!r2) {
   console.warn(
-    '[config] Cloudflare R2 is not configured — profile photo, gate pass, challan and vendor document endpoints will return 503.',
+    '[config] Cloudflare R2 is not configured — profile photo, gate pass, challan, vendor document, delivery receipt and accounts voucher endpoints will return 503.',
   )
 }
 

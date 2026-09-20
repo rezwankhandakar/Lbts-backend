@@ -2,6 +2,7 @@ import { Types } from 'mongoose'
 import { AppError } from '../../utils/app-error'
 import { comparisonKey } from '../gate-pass/gate-pass.constants'
 import type { GatePassDocument } from '../gate-pass/gate-pass.model'
+import { syncLabourBillCopies } from '../labour-bill/labour-bill.lines'
 import type { UserDocument } from '../user/user.model'
 import { gatePassLineDeliveredQty, gatePassProductStatusFor } from './trip-do.constants'
 import type { GatePassProductStatus, LinkedRowState } from './trip-do.constants'
@@ -316,6 +317,12 @@ export async function refreshGatePassLinkCopies(gatePass: GatePassDocument): Pro
         },
       })),
     ])
+
+    // A corrected CSD moves every labour bill row behind these rows into a
+    // different section, so their copies are re-read here rather than waiting
+    // for somebody to press Refresh.
+    const touched = await TripDoLineModel.find({ 'link.gatePassId': gatePass._id }).select('_id')
+    await syncLabourBillCopies(touched.map((row) => row._id))
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     console.warn(`[trip-do] linked rows not refreshed for ${gatePass.gatePassId}: ${message}`)

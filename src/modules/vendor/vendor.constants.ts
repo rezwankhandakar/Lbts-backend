@@ -451,3 +451,23 @@ export const MAX_ACTIVITY_ENTRIES = 50
  * worked through.
  */
 export const MAX_SUMMARY_ALERTS = 8
+
+/**
+ * How many months the vendor dashboard's trend covers.
+ *
+ * Six, because that is the span a vendor reads a season out of — the quiet
+ * month before Eid against the two after it — and because twelve columns on a
+ * phone is a picture nobody can read. The window always ends with the current
+ * month, so the last column is the one the figures above it describe.
+ */
+export const VENDOR_DASHBOARD_MONTHS = 6
+
+/**
+ * Trips on the vendor dashboard's recent list.
+ *
+ * Deliberately short. This is the "what went out lately" glance, and the Trips
+ * tab — filtered, paged and totalled — is where the list is actually worked.
+ * A dashboard that tries to be the list is a list nobody opens and a dashboard
+ * nobody reads.
+ */
+export const VENDOR_DASHBOARD_TRIPS = 5
