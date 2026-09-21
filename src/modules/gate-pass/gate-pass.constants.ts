@@ -85,25 +85,38 @@ export type GatePassReferenceType = (typeof GATE_PASS_REFERENCE_TYPES)[number]
  * Writing covers creating a gate pass and editing or submitting one that is
  * still open — and deleting one. Reviewing is the verification decision.
  *
- * Deleting is deliberately not a fourth set: it is `canWrite` on the route
- * plus the ownership rule in `gate-pass.access.ts`, so an operator removes
- * their own work and only Admin or Manager removes anybody else's.
+ * Deleting is deliberately not a fourth set: it is `canWrite` on the route,
+ * and `gate-pass.access.ts` puts no ownership rule on top of it.
  *
- * `Vendor` appears in none of them: gate passes are the transport service's
- * own operating record, not something an external supplier files or reads.
- * `CEO` reads everything and writes nothing — executive oversight, not data
- * entry.
+ * `Vendor` appears in none of them, and every other role appears in all of
+ * them. Gate passes are the transport service's own operating record, not
+ * something an external supplier files or reads — and the four staff roles
+ * work that record together. `CEO` is a full participant here rather than an
+ * observer, because the business asked for one rule per module rather than a
+ * different rule per person.
  */
 export const GATE_PASS_READ_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
-export const GATE_PASS_WRITE_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'OpEx']
-export const GATE_PASS_REVIEW_ROLES: readonly UserRole[] = ['Admin', 'Manager']
+export const GATE_PASS_WRITE_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
+export const GATE_PASS_REVIEW_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
 
 /**
- * Roles that may act on a record they did not create. Everyone else is scoped
- * to their own work — an OpEx edits, submits and deletes their own gate
- * passes, and cannot touch a colleague's.
+ * Roles that may act on a record they did not create — which is now every role
+ * that may write at all.
+ *
+ * It stays a set of its own rather than folding into `GATE_PASS_WRITE_ROLES`,
+ * because it answers a different question: the first says who may work this
+ * module, this says whether their work is scoped to their own records. The
+ * business asked for the scope to come off; narrowing it again is this line.
+ *
+ * While it equals the write set, `visibilityFilter` returns null for everyone,
+ * so a colleague's Draft is readable too. That is what full access means here.
  */
-export const GATE_PASS_MANAGE_ANY_ROLES: readonly UserRole[] = ['Admin', 'Manager']
+export const GATE_PASS_MANAGE_ANY_ROLES: readonly UserRole[] = [
+  'Admin',
+  'Manager',
+  'CEO',
+  'OpEx',
+]
 
 export function canManageAnyGatePass(role: UserRole): boolean {
   return GATE_PASS_MANAGE_ANY_ROLES.includes(role)

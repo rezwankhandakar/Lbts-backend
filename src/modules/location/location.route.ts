@@ -4,7 +4,11 @@ import { auth, requireRole } from '../../middlewares/auth'
 import { requireDb } from '../../middlewares/require-db'
 import { validateRequest } from '../../middlewares/validate-request'
 import type { UserRole } from '../user/user.constants'
-import { LOCATION_MANAGE_ROLES, LOCATION_READ_ROLES } from './location.constants'
+import {
+  LOCATION_LOOKUP_ROLES,
+  LOCATION_MANAGE_ROLES,
+  LOCATION_READ_ROLES,
+} from './location.constants'
 import {
   deleteLocation,
   getDistricts,
@@ -26,34 +30,41 @@ import {
 
 /**
  * The master collection has two audiences with two different rights, so the
- * router has two halves.
+ * router has two halves — and the halves are *questions*, not URL prefixes.
  *
- * **Reading** is open to everyone who may reach a challan. The entry form
- * needs the districts and thanas to offer a cascading selector, and a details
- * page needs them to say what a location type is — refusing that to an
- * Operation Executive would make the module unusable by the people who use it
- * most.
+ * **The master list is Admin-only**: listing it, adding a row, correcting one,
+ * removing one, and the resolver statistics. It is reference data the whole
+ * operation classifies deliveries against, one careless edit re-classifies
+ * every future challan in a district, and there is no per-row owner to scope
+ * it to.
  *
- * **Writing** is Admin-only. This is reference data the whole operation
- * classifies deliveries against; one careless edit reclassifies every future
- * challan in a district, and there is no per-record owner to scope it to.
+ * **The lookups belong to the Challan audience**: `/districts`, `/thanas` and
+ * `/resolve`. Those are not this module being read — they are the Challan and
+ * Gate Pass entry forms asking it a question, and closing them would leave a
+ * Manager, a CEO or an Operation Executive unable to set a location on a
+ * challan at all. Making the collection private and its lookups usable is the
+ * whole point of the split; `location.constants.ts` says so at more length.
  *
- * Order is the same as everywhere else in the API: requireDb first, because
- * auth reads the profile from MongoDB; then auth; then requireRole, which
- * reads `role` from that profile rather than from the token.
+ * So there is deliberately **no router-wide role check** here. Every route
+ * states its own, which is what stops a lookup added later from quietly
+ * inheriting the wrong one. `requireDb` and `auth` still run across the
+ * router, in that order, because `auth` reads the profile from MongoDB and
+ * `requireRole` reads the role from that profile rather than from the token.
  */
 const router = Router()
 
-router.use(requireDb, auth, requireRole(...(LOCATION_READ_ROLES as UserRole[])))
+router.use(requireDb, auth)
 
+const canLookUp = requireRole(...(LOCATION_LOOKUP_ROLES as UserRole[]))
+const canRead = requireRole(...(LOCATION_READ_ROLES as UserRole[]))
 const canManage = requireRole(...(LOCATION_MANAGE_ROLES as UserRole[]))
 
 /**
  * Declared before `/:id`, or Express matches these as an id and the parameter
  * schema rejects them with an unhelpful 400.
  */
-router.get('/districts', getDistricts)
-router.get('/thanas', validateRequest({ query: thanaQuerySchema }), getThanas)
+router.get('/districts', canLookUp, getDistricts)
+router.get('/thanas', canLookUp, validateRequest({ query: thanaQuerySchema }), getThanas)
 router.get('/stats', canManage, getStats)
 
 /**
@@ -80,12 +91,13 @@ const resolveLimiter = rateLimit({
 
 router.post(
   '/resolve',
+  canLookUp,
   resolveLimiter,
   validateRequest({ body: resolveLocationSchema }),
   postResolve,
 )
 
-router.get('/', validateRequest({ query: listLocationsQuerySchema }), getLocations)
+router.get('/', canRead, validateRequest({ query: listLocationsQuerySchema }), getLocations)
 
 router.post('/', canManage, validateRequest({ body: createLocationSchema }), postLocation)
 

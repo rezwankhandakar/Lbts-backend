@@ -161,11 +161,15 @@ describe('record visibility', () => {
     assert.equal(visibilityFilter(manager), null)
   })
 
-  it('hides an unfinished draft belonging to another operator', () => {
+  it('shows an unfinished draft to every staff role', () => {
+    // visibilityFilter returns null for all of them now, so there is nothing
+    // left for canViewRecord to hide.
     const draft = recordStub('opex1', 'Draft')
 
+    assert.equal(visibilityFilter(opex), null)
+    assert.equal(visibilityFilter(otherOpex), null)
     assert.equal(canViewRecord(draft, opex), true)
-    assert.equal(canViewRecord(draft, otherOpex), false)
+    assert.equal(canViewRecord(draft, otherOpex), true)
     assert.equal(canViewRecord(draft, manager), true)
   })
 
@@ -197,11 +201,9 @@ describe('edit and delete rules', () => {
     }
   })
 
-  it('refuses to edit work created by somebody else', () => {
-    // Visible, because it has been submitted — but still not theirs to change.
-    assert.throws(
-      () => assertCanEdit(recordStub('opex1', 'Submitted'), otherOpex),
-      /only change gate passes you created/,
+  it('lets an operator correct work created by somebody else', () => {
+    assert.doesNotThrow(() =>
+      assertCanEdit(recordStub('opex1', 'Submitted'), otherOpex),
     )
   })
 
@@ -220,10 +222,9 @@ describe('edit and delete rules', () => {
     }
   })
 
-  it('will not let one operator delete a draft created by another', () => {
-    assert.throws(
-      () => assertCanDelete(recordStub('opex1', 'Draft'), otherOpex),
-      /Gate pass not found/,
-    )
+  it('lets one operator delete a draft created by another', () => {
+    // Ownership scoping came off the module: a colleague's draft is visible
+    // and removable, which is what full access means here.
+    assert.doesNotThrow(() => assertCanDelete(recordStub('opex1', 'Draft'), otherOpex))
   })
 })

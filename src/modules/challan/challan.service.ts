@@ -575,8 +575,32 @@ export interface ChallanStats {
   total: number;
   today: number;
   totalQty: number;
+  totalAmount: number;
   batchesProcessing: number;
   batchesCompleted: number;
+  /**
+   * The backlogs, unfiltered — the whole collection rather than a list
+   * somebody has narrowed down.
+   *
+   * The records toolbar’s chips answer the filters in force, which is the
+   * honest reading of a filtered list and is why they are computed there. The
+   * dashboard asks a different question: not "what is outstanding in this
+   * view" but "what is outstanding at all". The Known gaps entry in CLAUDE.md
+   * names this function as where that figure would go if it were ever wanted
+   * alongside, and this is it.
+   *
+   * It costs nothing to answer. The unfiltered totals pass already computes
+   * every one of these in the same grouped stage it runs for `total` and
+   * `totalQty`, and until now they were discarded on the way out.
+   */
+  blankAmount: number;
+  partialAmount: number;
+  locationPending: number;
+  locationReview: number;
+  notDispatched: number;
+  partlyDispatched: number;
+  returnedAtDepot: number;
+  unpricedChallans: number;
 }
 
 /**
@@ -604,8 +628,17 @@ export async function getChallanStats(): Promise<ChallanStats> {
     total: totals.total,
     today: todayCount,
     totalQty: totals.totalQty,
+    totalAmount: totals.totalAmount,
     batchesProcessing: batches.get("Processing") ?? 0,
     batchesCompleted: batches.get("Completed") ?? 0,
+    blankAmount: totals.blankAmount,
+    partialAmount: totals.partialAmount,
+    locationPending: totals.locationPending,
+    locationReview: totals.locationReview,
+    notDispatched: totals.notDispatched,
+    partlyDispatched: totals.partlyDispatched,
+    returnedAtDepot: totals.returnedAtDepot,
+    unpricedChallans: totals.unpricedChallans,
   };
 }
 

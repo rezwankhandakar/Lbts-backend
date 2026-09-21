@@ -100,8 +100,10 @@ export function chargeStatusFor(
  *
  * The same shape Gate Pass uses, and for the same reasons. `Vendor` appears in
  * none of them — a challan carries a customer's home address and phone number,
- * and an external supplier has no business reading one. `CEO` reads everything
- * and writes nothing.
+ * and an external supplier has no business reading one. Every other role
+ * appears in all of them, `CEO` included: the office works this module
+ * together, and the business asked for one rule per module rather than a
+ * different rule per person.
  */
 export const CHALLAN_READ_ROLES: readonly UserRole[] = [
   "Admin",
@@ -112,16 +114,24 @@ export const CHALLAN_READ_ROLES: readonly UserRole[] = [
 export const CHALLAN_WRITE_ROLES: readonly UserRole[] = [
   "Admin",
   "Manager",
+  "CEO",
   "OpEx",
 ];
 
 /**
- * Roles that may correct or remove a challan somebody else filed. Everyone
- * else is scoped to their own work.
+ * Roles that may correct or remove a challan somebody else filed — which is
+ * now every role that may write at all.
+ *
+ * It stays a set of its own rather than folding into `CHALLAN_WRITE_ROLES`,
+ * because it answers a different question: the first says who may work this
+ * module, this says whether their work is scoped to their own records. The
+ * business asked for the scope to come off; narrowing it again is this line.
  */
 export const CHALLAN_MANAGE_ANY_ROLES: readonly UserRole[] = [
   "Admin",
   "Manager",
+  "CEO",
+  "OpEx",
 ];
 
 export function canManageAnyChallan(role: UserRole): boolean {

@@ -276,13 +276,16 @@ export const MAX_LABOUR_BILL_PAGE_SIZE = 50
  * Module-level permissions, as CLAUDE.md asks each module to configure.
  *
  * Every row carries a customer's address and a receiver's number, so `Vendor`
- * is in no set — the Trip DO sheet's audience, for the sheet's reason. Scanning
- * challans in and typing what the handling cost is everybody who works that
- * sheet, Operation Executive included, because they are the people holding the
- * paper. **Finalizing and reopening** is `Admin` and `Manager`: it is the
- * sign-off on money being claimed, and the one step a bill cannot quietly take
- * back.
+ * is in no set — the Trip DO sheet's audience, for the sheet's reason.
+ *
+ * Every other role is in every set, and this module parts company with the
+ * Excel bill beside it for that. An Excel bill charges the rate card's figure
+ * against rows the sheet has matched, so it follows the sheet and is Admin
+ * only. A labour bill charges what nothing can derive — a van hire, four men
+ * pulling, three flights of stairs — so every amount is typed by whoever
+ * holds the paper, and it claims no sheet row from anybody. Scanning,
+ * typing, finalizing and reopening are open to the four staff roles alike.
  */
 export const LABOUR_BILL_READ_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
-export const LABOUR_BILL_WRITE_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'OpEx']
-export const LABOUR_BILL_REVIEW_ROLES: readonly UserRole[] = ['Admin', 'Manager']
+export const LABOUR_BILL_WRITE_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
+export const LABOUR_BILL_REVIEW_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']

@@ -81,14 +81,34 @@ export const PENDING_LOCATION_STATUS: LocationStatus = 'Pending'
  * Module-level permissions, configured here because that is what CLAUDE.md
  * asks each module to do.
  *
- * Reading the master collection is open to everyone who may reach a challan —
- * the entry form needs it to offer a cascading selector, and a challan list
- * needs it to say what a location type means. Writing it is Admin-only: this
- * is reference data the whole operation classifies deliveries against, and one
- * careless edit re-classifies every future challan in a district.
+ * **The master list itself is Admin-only** — reading it, adding a row,
+ * correcting one, removing one, and the resolver statistics beside them. It is
+ * reference data the whole operation classifies deliveries against: one
+ * careless edit re-classifies every future challan in a district, and there is
+ * no per-row owner to scope it to. Nobody but an Admin sees the page.
+ *
+ * **The lookups are not the master list, and they keep a wider audience.**
+ * `GET /locations/districts`, `GET /locations/thanas` and `POST
+ * /locations/resolve` are not this module being read; they are the Challan and
+ * Gate Pass entry forms asking a question of it — which districts exist, which
+ * thanas sit under one, and what this typed address resolves to. Closing them
+ * with the rest would not make the master list any more private; it would stop
+ * a Manager, a CEO or an Operation Executive setting a location on a challan
+ * at all, which is a module the business has just asked to leave wide open.
+ *
+ * So the split is by *question asked*, not by URL prefix: the collection is
+ * Admin's, and answering a form's question about it belongs to everyone who
+ * may file a challan. `location.route.ts` mounts the two sets separately for
+ * exactly that reason, and deliberately has no router-wide role check.
  */
-export const LOCATION_READ_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
+export const LOCATION_READ_ROLES: readonly UserRole[] = ['Admin']
 export const LOCATION_MANAGE_ROLES: readonly UserRole[] = ['Admin']
+
+/**
+ * Who may ask the master list a question from another module's form. The
+ * Challan audience, because that is the form these serve.
+ */
+export const LOCATION_LOOKUP_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
 
 /** Rows one page of the master list may return. */
 export const MAX_LOCATION_PAGE_SIZE = 100

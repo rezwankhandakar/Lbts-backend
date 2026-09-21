@@ -94,7 +94,8 @@ export function assertCanReadVendor(vendorId: string, actor: UserDocument): void
  * an honest 403, because that is a genuine permission answer and pretending
  * their own vendor does not exist would be absurd.
  *
- * CEO and OpEx land in the same 403: they read this module and change nothing.
+ * Every staff role passes the role check now, so the only caller this refuses
+ * is a Vendor account writing to the vendor it is linked to.
  */
 export function assertCanManageVendor(vendorId: string, actor: UserDocument): void {
   assertCanReadVendor(vendorId, actor)

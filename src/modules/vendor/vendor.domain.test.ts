@@ -95,15 +95,11 @@ describe('vendor access scope', () => {
     )
   })
 
-  it('makes CEO and OpEx read-only', () => {
+  it('lets CEO and OpEx change the fleet too', () => {
     for (const role of ['CEO', 'OpEx'] as UserRole[]) {
       assert.doesNotThrow(() => assertCanReadVendor(VENDOR_A, actor(role)), role)
-      assert.throws(
-        () => assertCanManageVendor(VENDOR_A, actor(role)),
-        (error: { statusCode: number }) => error.statusCode === 403,
-        role,
-      )
-      assert.throws(() => assertCanCreateVendor(actor(role)), /permission/i, role)
+      assert.doesNotThrow(() => assertCanManageVendor(VENDOR_A, actor(role)), role)
+      assert.doesNotThrow(() => assertCanCreateVendor(actor(role)), role)
     }
   })
 
@@ -121,19 +117,19 @@ describe('vendor access scope', () => {
 })
 
 describe('role sets', () => {
-  it('reads for everyone and writes for two', () => {
+  it('reads for everyone and writes for every staff role', () => {
     assert.deepEqual(
       [...VENDOR_READ_ROLES],
       ['Admin', 'Manager', 'CEO', 'OpEx', 'Vendor'],
     )
-    assert.deepEqual([...VENDOR_MANAGE_ROLES], ['Admin', 'Manager'])
+    assert.deepEqual([...VENDOR_MANAGE_ROLES], ['Admin', 'Manager', 'CEO', 'OpEx'])
   })
 
   it('puts Vendor in the read set and nowhere near the write set', () => {
     assert.equal(canReadVendors('Vendor'), true)
     assert.equal(canManageVendors('Vendor'), false)
-    assert.equal(canManageVendors('CEO'), false)
-    assert.equal(canManageVendors('OpEx'), false)
+    assert.equal(canManageVendors('CEO'), true)
+    assert.equal(canManageVendors('OpEx'), true)
   })
 })
 

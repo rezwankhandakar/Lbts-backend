@@ -245,8 +245,15 @@ export const MAX_GATE_PASS_OPTIONS = 12
  *
  * The sheet is challans and gate passes side by side, so it takes the audience
  * both of those share: `Vendor` is in neither set, because every row carries a
- * customer's address and phone number. `CEO` reads the sheet and changes
- * nothing on it.
+ * customer's address and phone number.
+ *
+ * Reading and writing part company here, unlike the operating modules. The
+ * whole office reads the sheet — it is how anyone answers which gate pass a
+ * delivery went out on — but **only `Admin` changes it**. A Trip DO link is
+ * what an Excel bill is then built from and what a gate pass line counts its
+ * delivered pieces against, so a link set wrongly is money charged to the
+ * wrong unit. `Manager`, `CEO` and `OpEx` read the sheet and change nothing
+ * on it.
  *
  * Linking is deliberately **not** scoped to the challan's author, the way the
  * print mark is not. Setting a Trip DO says which gate pass some goods came out
@@ -254,4 +261,4 @@ export const MAX_GATE_PASS_OPTIONS = 12
  * changes nothing the challan says about the delivery itself.
  */
 export const TRIP_DO_READ_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
-export const TRIP_DO_WRITE_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'OpEx']
+export const TRIP_DO_WRITE_ROLES: readonly UserRole[] = ['Admin']

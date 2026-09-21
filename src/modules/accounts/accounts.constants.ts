@@ -394,11 +394,20 @@ export function maxVoucherBytesFor(mimeType: string): number {
 /**
  * Module-level permissions, as CLAUDE.md asks each module to configure.
  *
- * Accounts is the office's money, so it is narrower than any operating module.
- * `CEO` reads everything — the profit and loss exists for them — and writes
- * nothing. `Admin` and `Manager` keep the books. `OpEx` is out: an Operation
+ * Accounts is the office's money, so it is narrower than any operating module
+ * and it is the one module where `Admin` does not write.
+ *
+ * `Manager` keeps the books, alone: recording money in and out is one
+ * person's job, and a second pair of hands in it is how a cash book stops
+ * reconciling. `Admin` and `CEO` read everything — the profit and loss exists
+ * for the second, and the first administers the system rather than its
+ * money — and neither writes an entry. `OpEx` is out altogether: an Operation
  * Executive enters a trip's bill on the trip, which is what Accounts reads,
  * and has no need to see the office's balances. `Vendor` is in no set.
+ *
+ * `Admin` being read-only here is deliberate and is worth knowing before
+ * changing it: an Admin who needs to correct an entry changes the rule, they
+ * do not have a quiet way around it.
  */
 export const ACCOUNTS_READ_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO']
-export const ACCOUNTS_WRITE_ROLES: readonly UserRole[] = ['Admin', 'Manager']
+export const ACCOUNTS_WRITE_ROLES: readonly UserRole[] = ['Manager']

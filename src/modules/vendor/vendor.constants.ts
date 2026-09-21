@@ -351,18 +351,18 @@ export type ActivityAction = (typeof ACTIVITY_ACTIONS)[number]
  * splitting "may add a vehicle" from "may add a driver" would be a distinction
  * the business does not make.
  *
- * `OpEx` reads and does not write, which is the posture it already has on the
- * other two reference collections, Location and Product Rate: an Operation
- * Executive needs to know which vehicle sits under which vendor to file a gate
- * pass, and changing the fleet is not their job. `CEO` reads everything and
- * writes nothing, as everywhere else.
+ * Every staff role both reads and writes. `OpEx` and `CEO` could not change
+ * the fleet before and can now, because a vendor record is the operation's own
+ * supplier list rather than anybody's private work, and the business asked
+ * for one rule per module rather than a different rule per person.
  *
  * `Vendor` is the one role in the system that appears in a read set and is
  * *scoped* — see `vendor.access.ts`. It reads its own vendor and nothing else,
- * and it writes nothing at all.
+ * and it writes nothing at all. That is the whole security story of this
+ * module and it is untouched by the widening above.
  */
 export const VENDOR_READ_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx', 'Vendor']
-export const VENDOR_MANAGE_ROLES: readonly UserRole[] = ['Admin', 'Manager']
+export const VENDOR_MANAGE_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
 
 /**
  * The role whose access is scoped to one vendor. Everything else in this

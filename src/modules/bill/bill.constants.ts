@@ -190,11 +190,15 @@ export const MAX_BILL_PAGE_SIZE = 50
  * Module-level permissions, as CLAUDE.md asks each module to configure.
  *
  * A bill is Trip DO sheet rows, so it has the sheet's audience: `Vendor` is in
- * no set, because every row carries a customer's address. Preparing a bill —
- * creating it, adding and removing rows — is everybody who writes the sheet.
- * **Finalizing and reopening** is `Admin` and `Manager`: it is the sign-off on
- * money leaving the office, and the one step a bill cannot quietly take back.
+ * no set, because every row carries a customer's address.
+ *
+ * And it takes the sheet's split too. The whole office reads a bill; **only
+ * `Admin` prepares one** — creating it, adding and removing rows, refreshing
+ * it — and only `Admin` finalizes or reopens it. A bill claims Trip DO rows
+ * so no two bills can charge the same run, which is exactly the decision the
+ * sheet itself is now Admin-only for; a preparer who could not set a Trip DO
+ * but could bill one would be half a permission.
  */
 export const BILL_READ_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
-export const BILL_WRITE_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'OpEx']
-export const BILL_REVIEW_ROLES: readonly UserRole[] = ['Admin', 'Manager']
+export const BILL_WRITE_ROLES: readonly UserRole[] = ['Admin']
+export const BILL_REVIEW_ROLES: readonly UserRole[] = ['Admin']

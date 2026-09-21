@@ -340,20 +340,34 @@ export function driverTripBlocker(driverStatus: DriverStatus): string | null {
  * The same shape as Challan, and for the same reason: a trip carries every
  * challan on it — customer names, delivery addresses, receivers' phone numbers
  * — so `Vendor` appears in neither set, even though a trip is assigned to a
- * vendor. `CEO` reads and writes nothing.
+ * vendor. Every other role appears in both, `CEO` included: the four staff
+ * roles run trips together, and the business asked for one rule per module
+ * rather than a different rule per person.
  *
  * Writing includes adding a driver from inside a trip. That is wider than the
- * Vendor module, where only Admin and Manager change the fleet — deliberately:
- * a driver the master does not know is the ordinary thing an operator meets at
- * the gate, and sending them away to ask a manager stops a lorry. The write is
- * still only ever an *addition*, under a working vendor, with every rule the
- * fleet tab applies.
+ * Vendor module's own fleet tab was — deliberately: a driver the master does
+ * not know is the ordinary thing an operator meets at the gate, and sending
+ * them away to ask a manager stops a lorry. The write is still only ever an
+ * *addition*, under a working vendor, with every rule the fleet tab applies.
  */
 export const DELIVERY_READ_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
-export const DELIVERY_WRITE_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'OpEx']
+export const DELIVERY_WRITE_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
 
-/** Roles that may change or remove a trip somebody else created. */
-export const DELIVERY_MANAGE_ANY_ROLES: readonly UserRole[] = ['Admin', 'Manager']
+/**
+ * Roles that may change or remove a trip somebody else created — which is now
+ * every role that may write at all.
+ *
+ * It stays a set of its own rather than folding into `DELIVERY_WRITE_ROLES`,
+ * because it answers a different question: the first says who may work this
+ * module, this says whether their work is scoped to their own trips. The
+ * business asked for the scope to come off; narrowing it again is this line.
+ */
+export const DELIVERY_MANAGE_ANY_ROLES: readonly UserRole[] = [
+  'Admin',
+  'Manager',
+  'CEO',
+  'OpEx',
+]
 
 export function canManageAnyTrip(role: UserRole): boolean {
   return DELIVERY_MANAGE_ANY_ROLES.includes(role)

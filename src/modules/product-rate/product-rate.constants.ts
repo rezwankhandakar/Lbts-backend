@@ -49,16 +49,34 @@ export type Rate = FlatRate | TieredRate
  * Module-level permissions, configured here because that is what CLAUDE.md
  * asks each module to do.
  *
- * The same split the Location master takes, and for the same reason. Reading
- * is open to everyone who may reach a challan: the entry form offers product
- * names off this collection when a model is pasted, and refusing that to an
- * Operation Executive would make the feature useless to the people who use it
- * most. Writing is Admin-only — a rate is money, one careless edit changes
- * what every future challan in a category is charged at, and there is no
- * per-row owner to scope it to.
+ * The same split the Location master takes, and for a sharper reason. **The
+ * rate card itself is Admin-only** — reading it, adding a row, correcting one,
+ * removing one, and the statistics beside them. A rate is money: one careless
+ * edit changes what every future challan in a category is charged at, there is
+ * no per-row owner to scope it to, and what a delivery costs is not something
+ * the whole office needs to read down a page.
+ *
+ * **The lookups are not the rate card, and they keep a wider audience.**
+ * `GET /product-rates/models`, `GET /product-rates/products` and
+ * `POST /product-rates/quote` are the Challan and Gate Pass entry forms asking
+ * a question of it — is this pasted model on the card, what does the card call
+ * this product, what would these lines come to. Closing them would not make
+ * the card any more private; it would leave a Manager, a CEO or an Operation
+ * Executive typing product names against a card they cannot see, which is how
+ * a line silently ends up with no rate at all.
+ *
+ * So the split is by *question asked*, not by URL prefix, and
+ * `product-rate.route.ts` mounts the two sets separately rather than putting
+ * one role check across the router.
  */
-export const PRODUCT_RATE_READ_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
+export const PRODUCT_RATE_READ_ROLES: readonly UserRole[] = ['Admin']
 export const PRODUCT_RATE_MANAGE_ROLES: readonly UserRole[] = ['Admin']
+
+/**
+ * Who may ask the rate card a question from another module's form. The Challan
+ * audience, because that is the form these serve.
+ */
+export const PRODUCT_RATE_LOOKUP_ROLES: readonly UserRole[] = ['Admin', 'Manager', 'CEO', 'OpEx']
 
 /** Rows one page of the rate card may return. */
 export const MAX_PRODUCT_RATE_PAGE_SIZE = 100

@@ -61,16 +61,18 @@ describe("the challan vocabulary", () => {
     assert.equal(CHALLAN_WRITE_ROLES.includes("Vendor"), false);
   });
 
-  it("lets the CEO read without writing", () => {
-    assert.equal(CHALLAN_READ_ROLES.includes("CEO"), true);
-    assert.equal(CHALLAN_WRITE_ROLES.includes("CEO"), false);
+  it("gives every other role the whole module", () => {
+    for (const role of ["Admin", "Manager", "CEO", "OpEx"] as const) {
+      assert.equal(CHALLAN_READ_ROLES.includes(role), true);
+      assert.equal(CHALLAN_WRITE_ROLES.includes(role), true);
+    }
   });
 
-  it("lets only Admin and Manager act on somebody else’s challan", () => {
+  it("scopes nobody to their own challans any more", () => {
     assert.equal(canManageAnyChallan("Admin"), true);
     assert.equal(canManageAnyChallan("Manager"), true);
-    assert.equal(canManageAnyChallan("OpEx"), false);
-    assert.equal(canManageAnyChallan("CEO"), false);
+    assert.equal(canManageAnyChallan("OpEx"), true);
+    assert.equal(canManageAnyChallan("CEO"), true);
     assert.equal(canManageAnyChallan("Vendor"), false);
   });
 });
@@ -354,18 +356,13 @@ describe("who may change a challan", () => {
     assert.doesNotThrow(() => assertCanDelete(record, owner));
   });
 
-  it("will not let one operator touch another operator’s challan", () => {
-    assert.throws(
-      () => assertCanEdit(record, colleague),
-      /only correct challans you filed/,
-    );
-    assert.throws(
-      () => assertCanDelete(record, colleague),
-      /only delete challans you filed/,
-    );
+  it("lets one operator correct another operator’s challan", () => {
+    assert.doesNotThrow(() => assertCanEdit(record, colleague));
+    assert.doesNotThrow(() => assertCanDelete(record, colleague));
   });
 
-  it("lets Admin and Manager act on anybody’s", () => {
+  it("lets every staff role act on anybody’s", () => {
+    assert.equal(managesAnyRecord(colleague), true);
     assert.equal(managesAnyRecord(manager), true);
     assert.equal(managesAnyRecord(admin), true);
     assert.doesNotThrow(() => assertCanEdit(record, manager));

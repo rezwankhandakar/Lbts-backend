@@ -274,14 +274,18 @@ describe('permissions', () => {
     assert.equal(DELIVERY_WRITE_ROLES.includes('Vendor'), false)
   })
 
-  it('lets CEO read and not write', () => {
-    assert.equal(DELIVERY_READ_ROLES.includes('CEO'), true)
-    assert.equal(DELIVERY_WRITE_ROLES.includes('CEO'), false)
+  it('gives every other role the whole module', () => {
+    for (const role of ['Admin', 'Manager', 'CEO', 'OpEx'] as const) {
+      assert.equal(DELIVERY_READ_ROLES.includes(role), true)
+      assert.equal(DELIVERY_WRITE_ROLES.includes(role), true)
+    }
   })
 
-  it('lets Admin and Manager change anybody’s trip, and nobody else', () => {
+  it('scopes nobody to their own trips any more', () => {
     assert.equal(canManageAnyTrip('Admin'), true)
     assert.equal(canManageAnyTrip('Manager'), true)
-    assert.equal(canManageAnyTrip('OpEx'), false)
+    assert.equal(canManageAnyTrip('OpEx'), true)
+    assert.equal(canManageAnyTrip('CEO'), true)
+    assert.equal(canManageAnyTrip('Vendor'), false)
   })
 })
