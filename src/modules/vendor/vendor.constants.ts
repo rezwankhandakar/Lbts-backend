@@ -301,6 +301,13 @@ export const ACTIVITY_ACTIONS = [
   'vendor.updated',
   'vendor.status',
   'vendor.photo',
+  /**
+   * Written once the record is actually gone. The journal is no longer purged
+   * with the vendor — it is the application's audit history now, and every row
+   * carries its labels as copies precisely so it still reads with nothing left
+   * to point at. See `removeVendor`.
+   */
+  'vendor.deleted',
   'vehicle.created',
   'vehicle.updated',
   'vehicle.status',

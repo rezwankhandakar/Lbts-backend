@@ -2,6 +2,9 @@ import { Types } from 'mongoose'
 import type { QueryFilter } from 'mongoose'
 import { AppError } from '../../utils/app-error'
 import { nextSequence } from '../../utils/counter'
+import { changeSummary, changesBetween, takaValue } from '../activity/activity.diff'
+import type { FieldSpec } from '../activity/activity.diff'
+import { recordActivity } from '../activity/activity.recorder'
 import { DeliveryModel } from '../delivery/delivery.model'
 import type { UserDocument } from '../user/user.model'
 import { escapeRegex } from '../vendor/vendor.lookups'
@@ -283,6 +286,69 @@ async function refreshLinks(...entries: (Pick<EntryDocument, 'advanceId' | 'fina
 // Writing
 // ---------------------------------------------------------------------------
 
+/**
+ * An entry flattened to the values a journal row would quote.
+ *
+ * Built off the serialized record rather than the document, so a wallet, a
+ * vendor and a trip arrive as the names somebody would have read on screen
+ * rather than as ids — the rule `activity.diff.ts` is built around. A cash
+ * book correction recorded as `walletId 66f1… → 66f2…` answers nothing.
+ */
+function entrySnapshot(record: EntryRecord) {
+  return {
+    date: record.date,
+    amount: record.amount,
+    wallet: record.wallet?.name ?? null,
+    toWallet: record.toWallet?.name ?? null,
+    party: record.party,
+    reference: record.reference,
+    note: record.note,
+    expenseName: record.expenseName,
+    purpose: record.purpose,
+    vendor: record.vendor?.name ?? null,
+    trip: record.trip?.tripNumber ?? null,
+    period: record.period?.label ?? null,
+    source: record.source,
+    finalBill: record.finalBill?.label ?? null,
+    labourBill: record.labourBill?.label ?? null,
+    advance: record.advance?.entryNumber ?? null,
+  }
+}
+
+type EntrySnapshot = ReturnType<typeof entrySnapshot>
+
+const ENTRY_FIELDS: FieldSpec<EntrySnapshot>[] = [
+  { field: 'amount', label: 'Amount', format: takaValue },
+  { field: 'date', label: 'Date' },
+  { field: 'wallet', label: 'Wallet' },
+  { field: 'toWallet', label: 'To wallet' },
+  { field: 'expenseName', label: 'Expense' },
+  { field: 'party', label: 'Party' },
+  { field: 'vendor', label: 'Vendor' },
+  { field: 'trip', label: 'Trip' },
+  { field: 'period', label: 'Month' },
+  { field: 'source', label: 'Source' },
+  { field: 'finalBill', label: 'Final bill' },
+  { field: 'labourBill', label: 'Labour bill' },
+  { field: 'advance', label: 'Advance' },
+  { field: 'reference', label: 'Reference' },
+  { field: 'purpose', label: 'Purpose' },
+  { field: 'note', label: 'Note' },
+]
+
+/** "৳50,000 vendor payment · Malek Transport · Aug 2026" — a row's own sentence. */
+function entryPhrase(record: EntryRecord): string {
+  const parts = [
+    `${takaValue(record.amount) ?? record.amount} ${describeKind(record.kind)}`,
+    record.vendor?.name ?? record.party ?? '',
+    record.expenseName,
+    record.period?.label ?? '',
+    record.wallet?.name ?? '',
+  ].filter((part) => part.length > 0)
+
+  return parts.join(' · ')
+}
+
 export async function createEntry(
   input: CreateEntryInput,
   actor: UserDocument,
@@ -324,7 +390,26 @@ export async function createEntry(
   }
 
   await refreshLinks(entry)
-  return { entry: await serializeEntry(entry), replayed: false }
+  const record = await serializeEntry(entry)
+
+  /**
+   * Written only on a genuine insert. A replay — a double press, a retry after
+   * a cold-start timeout — returns above without reaching here, which is the
+   * same rule the idempotency claim itself follows: the journal must say a
+   * vendor was paid once, because they were.
+   */
+  await recordActivity({
+    action: 'accounts.entry-created',
+    entityType: 'AccountsEntry',
+    entityId: entry._id,
+    entityLabel: record.entryNumber,
+    summary: `${record.entryNumber} — ${entryPhrase(record)}`,
+    changes: changesBetween({}, entrySnapshot(record), ENTRY_FIELDS),
+    vendorId: entry.vendorId ?? null,
+    actor,
+  })
+
+  return { entry: record, replayed: false }
 }
 
 /**
@@ -339,6 +424,17 @@ export async function updateEntry(id: string, input: UpdateEntryInput, actor: Us
   }
 
   const before = { advanceId: entry.advanceId, finalBillId: entry.finalBillId }
+  /**
+   * What the entry said, read before it is rewritten.
+   *
+   * This is the row the whole module most needs. CLAUDE.md records that
+   * Accounts entries are "corrected and deleted in place, not reversed" and
+   * that "there is no history of what an entry said before" — which on a cash
+   * book is the difference between one that reconciles and one that cannot be
+   * checked at all. This is that history, and it costs one serialization on a
+   * path that is already a write.
+   */
+  const snapshotBefore = entrySnapshot(await serializeEntry(entry))
   const fields = await resolveFields(input, entry)
 
   entry.set({ ...fields, updatedBy: actor._id })
@@ -348,7 +444,22 @@ export async function updateEntry(id: string, input: UpdateEntryInput, actor: Us
   if (entry.kind === 'Advance') {
     await refreshAdvanceSettlement(entry._id)
   }
-  return serializeEntry(await findEntry(id))
+
+  const record = await serializeEntry(await findEntry(id))
+  const changes = changesBetween(snapshotBefore, entrySnapshot(record), ENTRY_FIELDS)
+
+  await recordActivity({
+    action: 'accounts.entry-updated',
+    entityType: 'AccountsEntry',
+    entityId: entry._id,
+    entityLabel: record.entryNumber,
+    summary: `${record.entryNumber} corrected — ${changeSummary(changes)}`,
+    changes,
+    vendorId: entry.vendorId ?? null,
+    actor,
+  })
+
+  return record
 }
 
 /**
@@ -360,7 +471,10 @@ export async function updateEntry(id: string, input: UpdateEntryInput, actor: Us
  * object, so the worst outcome of a failure is an orphan in the bucket rather
  * than a file nothing points at being kept because the delete was refused.
  */
-export async function deleteEntry(id: string): Promise<{ id: string; entryNumber: string }> {
+export async function deleteEntry(
+  id: string,
+  actor: UserDocument,
+): Promise<{ id: string; entryNumber: string }> {
   const entry = await findEntry(id)
 
   if (entry.kind === 'Advance' && (await EntryModel.exists({ advanceId: entry._id }))) {
@@ -371,6 +485,14 @@ export async function deleteEntry(id: string): Promise<{ id: string; entryNumber
   }
 
   const voucherKey = entry.voucher?.key ?? null
+  /**
+   * Read while the record still exists, because after this it is the only
+   * account of what was deleted — and "money left the books and nothing says
+   * what it was" is the worst thing a cash book can contain.
+   */
+  const record = await serializeEntry(entry)
+  const snapshot = entrySnapshot(record)
+  const phrase = entryPhrase(record)
 
   await entry.deleteOne()
   await refreshLinks(entry)
@@ -378,6 +500,17 @@ export async function deleteEntry(id: string): Promise<{ id: string; entryNumber
   if (voucherKey) {
     await deleteVoucher(voucherKey)
   }
+
+  await recordActivity({
+    action: 'accounts.entry-deleted',
+    entityType: 'AccountsEntry',
+    entityId: entry._id,
+    entityLabel: entry.entryNumber,
+    summary: `${entry.entryNumber} deleted — ${phrase}`,
+    changes: changesBetween(snapshot, {}, ENTRY_FIELDS),
+    vendorId: entry.vendorId ?? null,
+    actor,
+  })
 
   return { id, entryNumber: entry.entryNumber }
 }

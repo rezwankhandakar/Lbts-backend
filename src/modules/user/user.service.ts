@@ -1,4 +1,5 @@
 import type { DecodedIdToken } from 'firebase-admin/auth'
+import { recordActivity } from '../activity/activity.recorder'
 import { DEFAULT_USER_ROLE, DEFAULT_USER_STATUS } from './user.constants'
 import { UserModel } from './user.model'
 import type { UserDocument } from './user.model'
@@ -64,14 +65,47 @@ export async function syncUserProfile(
     fieldsOnInsert.photoUrl = token.picture
   }
 
-  const user = await UserModel.findOneAndUpdate(
+  /**
+   * `includeResultMetadata` is what tells an account being created apart from
+   * one signing in again, and it costs nothing: the driver already knows which
+   * happened and this only asks it to say so. The alternative — a `findOne`
+   * before the upsert — would be a second round trip on the one endpoint the
+   * session listener calls on *every* page load, which on a sleeping M0
+   * instance is exactly the cost this codebase spends its time avoiding.
+   */
+  const result = await UserModel.findOneAndUpdate(
     { firebaseUid: token.uid },
     {
       $set: fieldsToSet,
       $setOnInsert: fieldsOnInsert,
     },
-    { new: true, upsert: true, setDefaultsOnInsert: true },
+    { new: true, upsert: true, setDefaultsOnInsert: true, includeResultMetadata: true },
   )
+
+  const user = result.value as UserDocument
+
+  /**
+   * A new account, journalled once.
+   *
+   * The actor is the person themselves, which is the honest reading: nobody
+   * granted this, somebody signed up. What makes the row worth having is the
+   * pair it forms with the `user.status` row an Admin writes later — together
+   * they say how long an account waited for approval, which is a question the
+   * account document cannot answer because it keeps only the latest change.
+   *
+   * Guarded on `upserted` rather than written every sync, or this would be a
+   * row per page load.
+   */
+  if (result.lastErrorObject?.upserted) {
+    await recordActivity({
+      action: 'user.created',
+      entityType: 'User',
+      entityId: user._id,
+      entityLabel: user.name,
+      summary: `${user.name} (${user.email}) signed up — created as ${user.role}, ${user.status}`,
+      actor: user,
+    })
+  }
 
   return user
 }

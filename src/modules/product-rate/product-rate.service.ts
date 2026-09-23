@@ -1,5 +1,8 @@
 import type { QueryFilter } from 'mongoose'
 import { AppError } from '../../utils/app-error'
+import { changeSummary, changesBetween } from '../activity/activity.diff'
+import type { ActivityChange } from '../activity/activity.diff'
+import { recordActivity } from '../activity/activity.recorder'
 import { ChallanModel } from '../challan/challan.model'
 import type { LocationType } from '../location/location.constants'
 import { UserModel } from '../user/user.model'
@@ -345,6 +348,55 @@ async function assertNotDuplicate(
   }
 }
 
+/**
+ * A rate as one readable figure, for a journal row.
+ *
+ * A tiered rate is two figures and a threshold, and rendering it as anything
+ * shorter would make the one kind of row that is genuinely hard to read look
+ * exactly like the ordinary kind. The card's own wording — "the first 5 at 60,
+ * the rest at 24" — is what somebody checking a charge is holding.
+ */
+function rateText(rate: Rate | null | undefined): string | null {
+  if (!rate) {
+    return null
+  }
+  return rate.kind === 'flat'
+    ? String(rate.amount)
+    : `first ${rate.firstQty} at ${rate.firstAmount}, rest at ${rate.restAmount}`
+}
+
+/**
+ * The three columns off the document itself.
+ *
+ * Deliberately not `serialize`, which is `async` because it resolves actor
+ * names — and a journal row wanting three figures has no business paying for
+ * a user lookup to get them.
+ */
+function ratesOf(rate: ProductRateDocument): Record<LocationType, Rate | null> {
+  return {
+    ISD: toRate(rate.rates?.ISD),
+    'OSD-Metro': toRate(rate.rates?.['OSD-Metro']),
+    'OSD-Thana': toRate(rate.rates?.['OSD-Thana']),
+  }
+}
+
+/** The three columns of one row, as the changes a journal entry records. */
+function rateChanges(
+  before: Partial<Record<LocationType, Rate | null>>,
+  after: Partial<Record<LocationType, Rate | null>>,
+): ActivityChange[] {
+  const columns: LocationType[] = ['ISD', 'OSD-Metro', 'OSD-Thana']
+
+  return columns
+    .map((column) => ({
+      field: `rates.${column}`,
+      label: column,
+      from: rateText(before[column]),
+      to: rateText(after[column]),
+    }))
+    .filter((change) => change.from !== change.to)
+}
+
 export async function createProductRate(
   input: CreateProductRateInput,
   actor: UserDocument,
@@ -363,7 +415,19 @@ export async function createProductRate(
     updatedBy: actor._id,
   })
 
-  return serialize(rate)
+  const record = await serialize(rate)
+
+  await recordActivity({
+    action: 'product-rate.created',
+    entityType: 'ProductRate',
+    entityId: rate._id,
+    entityLabel: labelOf(rate),
+    summary: `${labelOf(rate)} added to the rate card`,
+    changes: rateChanges({}, record.rates),
+    actor,
+  })
+
+  return record
 }
 
 /**
@@ -386,6 +450,24 @@ export async function updateProductRate(
   actor: UserDocument,
 ): Promise<ProductRateRecord> {
   const rate = await findProductRate(id)
+
+  /**
+   * Read before anything moves, and the figures with it.
+   *
+   * This is the module where the journal earns its keep most plainly. A
+   * challan stores a *copy* of the rate it was charged, so correcting a row
+   * here changes nothing that was already billed — which also means there is
+   * no record anywhere of what the card used to say. Somebody asking in
+   * November why September was charged 650 and October 700 has this row and
+   * nothing else.
+   */
+  const before = {
+    productName: rate.productName,
+    productModel: rate.productModel,
+    capacity: rate.capacity,
+    isActive: rate.isActive,
+  }
+  const ratesBefore = ratesOf(rate)
 
   const productName = input.productName ?? rate.productName
   const productModel = input.productModel ?? rate.productModel
@@ -414,7 +496,29 @@ export async function updateProductRate(
   rate.updatedBy = actor._id
   await rate.save()
 
-  return serialize(rate)
+  const record = await serialize(rate)
+
+  const changes = [
+    ...changesBetween(before, rate, [
+      { field: 'productName', label: 'Product' },
+      { field: 'productModel', label: 'Model' },
+      { field: 'capacity', label: 'Capacity' },
+      { field: 'isActive', label: 'In use' },
+    ]),
+    ...rateChanges(ratesBefore, record.rates),
+  ]
+
+  await recordActivity({
+    action: 'product-rate.updated',
+    entityType: 'ProductRate',
+    entityId: rate._id,
+    entityLabel: labelOf(rate),
+    summary: `${labelOf(before)} corrected — ${changeSummary(changes)}`,
+    changes,
+    actor,
+  })
+
+  return record
 }
 
 export interface ProductRateRemoval {
@@ -443,6 +547,9 @@ export async function removeProductRate(
 ): Promise<ProductRateRemoval> {
   const rate = await findProductRate(id)
 
+  const label = labelOf(rate)
+  const rates = ratesOf(rate)
+
   const challanCount = await ChallanModel.countDocuments({ 'items.rate.masterId': rate._id })
 
   if (challanCount > 0) {
@@ -452,10 +559,37 @@ export async function removeProductRate(
       await rate.save()
     }
 
+    await recordActivity({
+      action: 'product-rate.removed',
+      entityType: 'ProductRate',
+      entityId: rate._id,
+      entityLabel: label,
+      summary: `${label} deactivated instead of deleted — ${challanCount} challan${
+        challanCount === 1 ? '' : 's'
+      } cite it`,
+      changes: [{ field: 'isActive', label: 'In use', from: 'Yes', to: 'No' }],
+      actor,
+    })
+
     return { id: String(rate._id), deactivated: true, challanCount }
   }
 
   await rate.deleteOne()
+
+  /**
+   * The figures go into the row on the way out. Nothing else will hold them
+   * once the record is gone, and "what did this row charge before somebody
+   * removed it" is precisely the question a deleted rate raises.
+   */
+  await recordActivity({
+    action: 'product-rate.removed',
+    entityType: 'ProductRate',
+    entityId: rate._id,
+    entityLabel: label,
+    summary: `${label} deleted from the rate card — no challan cited it`,
+    changes: rateChanges(rates, {}),
+    actor,
+  })
 
   return { id: String(rate._id), deactivated: false, challanCount: 0 }
 }

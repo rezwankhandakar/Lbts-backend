@@ -1,6 +1,7 @@
 import type { QueryFilter } from 'mongoose'
 import { getFirebaseAuth } from '../../config/firebase'
 import { AppError } from '../../utils/app-error'
+import { recordActivity } from '../activity/activity.recorder'
 import { ADMIN_ROLE, canTransition } from '../user/user.constants'
 import type { UserRole, UserStatus } from '../user/user.constants'
 import { UserModel } from '../user/user.model'
@@ -247,16 +248,58 @@ export async function changeUserRole(
     target.vendorId = null
   }
 
+  const previousRole = target.role
+
   target.role = role
   target.roleUpdatedAt = new Date()
   target.roleUpdatedBy = actor._id
   await target.save()
 
-  return toAdminUser(
-    target,
-    new Map([[String(actor._id), actor.name]]),
-    await vendorRefsFor([target]),
-  )
+  const vendorRefs = await vendorRefsFor([target])
+
+  /**
+   * The journal entry, and it is the point of this module having one.
+   *
+   * `roleUpdatedBy` and `roleUpdatedAt` are provenance — they say who made the
+   * *latest* change and nothing about the one before it. CLAUDE.md listed that
+   * as a known gap for as long as there was no activity module: promote
+   * somebody to Admin, demote them an hour later, and the account reads as
+   * though the first change never happened. This is the row that survives the
+   * second change.
+   *
+   * The vendor link travels with it, because the role and the link are one
+   * decision — moving *to* Vendor requires a vendor and moving away clears it,
+   * so a row naming only the role would describe half of what happened.
+   */
+  await recordActivity({
+    action: 'user.role',
+    entityType: 'User',
+    entityId: target._id,
+    entityLabel: target.name,
+    summary:
+      role === 'Vendor'
+        ? `${target.name} changed from ${previousRole} to Vendor, linked to ${
+            vendorRefs.get(String(target.vendorId))?.name ?? 'a vendor'
+          }`
+        : `${target.name} changed from ${previousRole} to ${role}`,
+    changes: [
+      { field: 'role', label: 'Role', from: previousRole, to: role },
+      ...(previousRole === 'Vendor' || role === 'Vendor'
+        ? [
+            {
+              field: 'vendorId',
+              label: 'Vendor',
+              from: null,
+              to: vendorRefs.get(String(target.vendorId))?.name ?? null,
+            },
+          ]
+        : []),
+    ],
+    vendorId: target.vendorId ?? null,
+    actor,
+  })
+
+  return toAdminUser(target, new Map([[String(actor._id), actor.name]]), vendorRefs)
 }
 
 export async function changeUserStatus(
@@ -285,6 +328,30 @@ export async function changeUserStatus(
   // stops a stale reason from following a restored account around.
   target.statusNote = status === 'Active' ? null : (note ?? null)
   await target.save()
+
+  /**
+   * The note is recorded as part of the row rather than only on the account,
+   * because the account keeps one note and this decision had its own. A
+   * suspension explained in March and a reactivation in April leave the field
+   * blank, and the reason for the suspension with it.
+   */
+  await recordActivity({
+    action: 'user.status',
+    entityType: 'User',
+    entityId: target._id,
+    entityLabel: target.name,
+    summary: `${target.name} moved from ${current} to ${status}${
+      target.statusNote ? ` — ${target.statusNote}` : ''
+    }`,
+    changes: [
+      { field: 'status', label: 'Status', from: current, to: status },
+      ...(target.statusNote
+        ? [{ field: 'statusNote', label: 'Reason', from: null, to: target.statusNote }]
+        : []),
+    ],
+    vendorId: target.vendorId ?? null,
+    actor,
+  })
 
   return toAdminUser(
     target,
@@ -318,6 +385,28 @@ export async function removeUser(id: string, actor: UserDocument): Promise<{ id:
   }
 
   await target.deleteOne()
+
+  /**
+   * Recorded after the record is gone, and it is the one row here that could
+   * never have been kept on the account itself — the account is what was
+   * deleted. The email is in the summary deliberately: a name is how people
+   * talk about an account and an address is how it is identified, and the
+   * question this row exists to answer months later is "who removed the
+   * account that used to sign in as this".
+   */
+  await recordActivity({
+    action: 'user.deleted',
+    entityType: 'User',
+    entityId: target._id,
+    entityLabel: target.name,
+    summary: `${target.name} (${target.email}) deleted — was ${target.role}, ${target.status}`,
+    changes: [
+      { field: 'role', label: 'Role', from: target.role, to: null },
+      { field: 'status', label: 'Status', from: target.status, to: null },
+    ],
+    vendorId: target.vendorId ?? null,
+    actor,
+  })
 
   return { id: String(target._id) }
 }

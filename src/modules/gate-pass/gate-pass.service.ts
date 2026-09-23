@@ -2,6 +2,9 @@ import type { QueryFilter } from 'mongoose'
 import { getObjectStream } from '../../config/r2'
 import type { ObjectStream } from '../../config/r2'
 import { AppError } from '../../utils/app-error'
+import { changeSummary, changesBetween, dayValue } from '../activity/activity.diff'
+import type { FieldSpec } from '../activity/activity.diff'
+import { recordActivity } from '../activity/activity.recorder'
 import { refreshBillingStatus } from '../bill/bill.status'
 import { UserModel } from '../user/user.model'
 import type { UserDocument } from '../user/user.model'
@@ -592,6 +595,47 @@ function applyFields(
   )
 }
 
+/**
+ * A gate pass flattened to the values a journal row would quote.
+ *
+ * The goods are one string rather than a field per line, because lines have no
+ * identity of their own here — they are replaced wholesale on every update, so
+ * "line 2 changed" would be a sentence about a position rather than about a
+ * product. The whole load rendered once says what actually differs.
+ */
+function gatePassSnapshot(record: GatePassDocument) {
+  return {
+    tripDo: record.tripDo,
+    tripDate: dayValue(record.tripDate),
+    csd: record.csd,
+    unit: record.unit,
+    customerName: record.customerName,
+    vehicleNo: record.vehicleNo,
+    reference: record.zone ?? record.po ?? null,
+    items: record.items
+      .map((item) => `${item.productName} ${item.productModel} × ${item.qty}`)
+      .join('; '),
+  }
+}
+
+type GatePassSnapshot = ReturnType<typeof gatePassSnapshot>
+
+const GATE_PASS_FIELDS: FieldSpec<GatePassSnapshot>[] = [
+  { field: 'tripDo', label: 'Trip DO' },
+  { field: 'tripDate', label: 'Trip date' },
+  { field: 'customerName', label: 'Customer' },
+  { field: 'vehicleNo', label: 'Vehicle' },
+  { field: 'csd', label: 'CSD' },
+  { field: 'unit', label: 'Unit' },
+  { field: 'reference', label: 'Zone / PO' },
+  { field: 'items', label: 'Goods' },
+]
+
+/** "GP-2026-000123 · DHAKA METRO-NA-15-1469 · Walton" — a row's own sentence. */
+function gatePassPhrase(record: GatePassDocument): string {
+  return `${record.gatePassId} · ${record.tripDo} · ${record.customerName}`
+}
+
 export async function createGatePass(
   input: CreateGatePassInput,
   actor: UserDocument,
@@ -603,6 +647,15 @@ export async function createGatePass(
 
   applyFields(record, input)
   await record.save()
+
+  await recordActivity({
+    action: 'gate-pass.created',
+    entityType: 'GatePass',
+    entityId: record._id,
+    entityLabel: record.gatePassId,
+    summary: `${gatePassPhrase(record)} filed as a draft`,
+    actor,
+  })
 
   return serialize(record)
 }
@@ -645,6 +698,9 @@ export async function updateGatePass(
    */
   await assertGatePassEditKeepsLinks(record._id, input.items)
 
+  const before = gatePassSnapshot(record)
+  const statusBefore = record.status as GatePassStatus
+
   applyFields(record, input)
   returnForReverification(record, actor)
   record.updatedBy = actor._id
@@ -653,6 +709,27 @@ export async function updateGatePass(
   await refreshGatePassLinkCopies(record)
   // A corrected quantity moves how much of it the bills cover.
   await refreshBillingStatus({ gatePassIds: [record._id] })
+
+  const changes = changesBetween(before, gatePassSnapshot(record), GATE_PASS_FIELDS)
+
+  /**
+   * A correction that sent the record back for re-verification says so in the
+   * summary, because that is the consequence somebody reading the journal
+   * later actually cares about: a reviewer's verdict was withdrawn, and the
+   * record only says who caused it.
+   */
+  await recordActivity({
+    action: 'gate-pass.updated',
+    entityType: 'GatePass',
+    entityId: record._id,
+    entityLabel: record.gatePassId,
+    summary:
+      statusBefore !== record.status
+        ? `${record.gatePassId} corrected — ${changeSummary(changes)}; sent back from ${statusBefore} for re-verification`
+        : `${record.gatePassId} corrected — ${changeSummary(changes)}`,
+    changes,
+    actor,
+  })
 
   return serialize(record)
 }
@@ -816,6 +893,18 @@ export async function submitGatePass(
   record.updatedBy = actor._id
   await record.save()
 
+  await recordActivity({
+    action: 'gate-pass.submitted',
+    entityType: 'GatePass',
+    entityId: record._id,
+    entityLabel: record.gatePassId,
+    summary: `${gatePassPhrase(record)} submitted for review${
+      input.acknowledgeDuplicate ? ' — a possible duplicate Trip DO was acknowledged' : ''
+    }`,
+    changes: [{ field: 'status', label: 'Status', from: current, to: 'Submitted' }],
+    actor,
+  })
+
   return serialize(record)
 }
 
@@ -846,6 +935,31 @@ export async function reviewGatePass(
   record.statusNote = input.status === 'Verified' ? null : input.note || null
   record.updatedBy = actor._id
   await record.save()
+
+  /**
+   * Two actions rather than one, because verifying and sending back are the
+   * two halves of review and a reader filtering for one never wants the other.
+   * The note goes in the row: the record clears it on the next verification,
+   * and the reason a gate pass was sent back in August is exactly what nobody
+   * can reconstruct afterwards.
+   */
+  await recordActivity({
+    action: input.status === 'Verified' ? 'gate-pass.verified' : 'gate-pass.rejected',
+    entityType: 'GatePass',
+    entityId: record._id,
+    entityLabel: record.gatePassId,
+    summary:
+      input.status === 'Verified'
+        ? `${gatePassPhrase(record)} verified against its scan`
+        : `${gatePassPhrase(record)} sent back${record.statusNote ? ` — ${record.statusNote}` : ''}`,
+    changes: [
+      { field: 'status', label: 'Status', from: current, to: input.status },
+      ...(record.statusNote
+        ? [{ field: 'statusNote', label: 'Reason', from: null, to: record.statusNote }]
+        : []),
+    ],
+    actor,
+  })
 
   return serialize(record)
 }
@@ -966,8 +1080,30 @@ export async function removeGatePass(id: string, actor: UserDocument): Promise<{
   await assertGatePassNotLinked(record._id)
 
   const key = record.document?.key ?? null
+  const snapshot = gatePassSnapshot(record)
+  const phrase = gatePassPhrase(record)
+  const status = record.status
+
   await record.deleteOne()
   await discardGatePassDocument(key)
+
+  /**
+   * Withdrawing a gate pass is a delete rather than a status — the `Cancelled`
+   * state was removed precisely so a record that should not exist does not sit
+   * in every list being scrolled past. The cost of that decision is that
+   * nothing was left saying a gate pass had ever existed. This is the row that
+   * pays it, and it carries the whole record because there is nothing left to
+   * look up.
+   */
+  await recordActivity({
+    action: 'gate-pass.deleted',
+    entityType: 'GatePass',
+    entityId: record._id,
+    entityLabel: record.gatePassId,
+    summary: `${phrase} deleted while ${status}`,
+    changes: changesBetween(snapshot, {}, GATE_PASS_FIELDS),
+    actor,
+  })
 
   return { id: String(record._id) }
 }

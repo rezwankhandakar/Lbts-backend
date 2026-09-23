@@ -1,6 +1,7 @@
 import type { QueryFilter, Types } from 'mongoose'
 import { AppError } from '../../utils/app-error'
 import { nextSequence } from '../../utils/counter'
+import { recordActivity } from '../activity/activity.recorder'
 import { comparisonKey } from '../gate-pass/gate-pass.constants'
 import { GatePassModel } from '../gate-pass/gate-pass.model'
 import { TripDoLineModel } from '../trip-do/trip-do.model'
@@ -8,7 +9,12 @@ import type { TripDoLineDocument } from '../trip-do/trip-do.model'
 import type { UserRole } from '../user/user.constants'
 import { UserModel } from '../user/user.model'
 import type { UserDocument } from '../user/user.model'
-import { BILL_REVIEW_ROLES, arrangeBillLines, formatBillNumber } from './bill.constants'
+import {
+  BILL_REVIEW_ROLES,
+  arrangeBillLines,
+  billPeriodLabel,
+  formatBillNumber,
+} from './bill.constants'
 import { BillLineModel, BillModel } from './bill.model'
 import type { Bill, BillDocument, BillLineDocument } from './bill.model'
 import { toBillLineRecord, toBillRecord } from './bill.serializer'
@@ -265,6 +271,15 @@ export async function createBill(input: CreateBillInput, actor: UserDocument): P
     createdBy: actor._id,
   })
 
+  await recordActivity({
+    action: 'bill.created',
+    entityType: 'Bill',
+    entityId: bill._id,
+    entityLabel: bill.billNumber,
+    summary: `${bill.billNumber} opened for unit ${bill.unit}, ${billPeriodLabel(bill.month, bill.year)}`,
+    actor,
+  })
+
   return serializeBill(bill)
 }
 
@@ -328,6 +343,23 @@ export async function deleteBill(
     gatePassIds: lines.map((line) => line.gatePassId),
   })
 
+  /**
+   * How many sheet rows it let go is the part worth recording. Deleting a bill
+   * releases its claim on every Trip DO row it carried, which is what makes
+   * those rows billable again — so a row reappearing on somebody else's bill a
+   * week later has this as its explanation.
+   */
+  await recordActivity({
+    action: 'bill.deleted',
+    entityType: 'Bill',
+    entityId: bill._id,
+    entityLabel: bill.billNumber,
+    summary: `${bill.billNumber} (unit ${bill.unit}, ${billPeriodLabel(bill.month, bill.year)}) deleted — ${
+      lines.length
+    } sheet ${lines.length === 1 ? 'row is' : 'rows are'} billable again`,
+    actor,
+  })
+
   return { id: String(bill._id), billNumber: bill.billNumber, released: lines.length }
 }
 
@@ -363,6 +395,26 @@ export async function finalizeBill(id: string, actor: UserDocument): Promise<Bil
   bill.finalizedBy = actor._id
   bill.updatedBy = actor._id
   await bill.save()
+
+  /**
+   * The totals go into the row. A finalized bill can be reopened, changed and
+   * finalized again, and the record only ever holds the latest figure — so
+   * "what was unit WFR charged for August when we sent it" is a question only
+   * a journal can answer once somebody has reopened it.
+   */
+  await recordActivity({
+    action: 'bill.finalized',
+    entityType: 'Bill',
+    entityId: bill._id,
+    entityLabel: bill.billNumber,
+    summary: `${bill.billNumber} finalized — ${bill.lineCount} rows, ${bill.totalQty} pcs, ৳${bill.totalAmount.toLocaleString('en-BD')}`,
+    changes: [
+      { field: 'status', label: 'Status', from: 'Draft', to: 'Finalized' },
+      { field: 'totalAmount', label: 'Total', from: null, to: String(bill.totalAmount) },
+    ],
+    actor,
+  })
+
   return serializeBill(bill)
 }
 
@@ -378,5 +430,16 @@ export async function reopenBill(id: string, actor: UserDocument): Promise<BillR
   bill.reopenedBy = actor._id
   bill.updatedBy = actor._id
   await bill.save()
+
+  await recordActivity({
+    action: 'bill.reopened',
+    entityType: 'Bill',
+    entityId: bill._id,
+    entityLabel: bill.billNumber,
+    summary: `${bill.billNumber} reopened — it was finalized at ৳${bill.totalAmount.toLocaleString('en-BD')}`,
+    changes: [{ field: 'status', label: 'Status', from: 'Finalized', to: 'Draft' }],
+    actor,
+  })
+
   return serializeBill(bill)
 }

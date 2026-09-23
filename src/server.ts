@@ -10,6 +10,10 @@ import {
 import { ensureDnsResolvers } from './config/dns'
 import { migrateExpenseNames } from './modules/accounts/accounts.migration'
 import { seedAccounts } from './modules/accounts/accounts.seed'
+import {
+  foldLegacyVendorActivity,
+  syncActivityIndexes,
+} from './modules/activity/activity.migration'
 import { backfillBillingStatus } from './modules/bill/bill.status'
 import { dropLabourBillSlotCsd } from './modules/labour-bill/labour-bill.migration'
 import {
@@ -102,6 +106,15 @@ function start(): void {
     // A labour bill's slot was briefly a CSD and a month; it is a month, and the
     // sheet splits itself by the CSD on each row, so the field describes nothing.
     void dropLabourBillSlotCsd()
+    /**
+     * The activity journal. The TTL index first — MongoDB will not change an
+     * existing one's expiry on its own, so a retention change would otherwise
+     * do nothing at all — and then the fold of the legacy vendor journal,
+     * which CLAUDE.md kept precisely so an Activity module would inherit a
+     * complete history. The fold is idempotent (each row keeps its own id), so
+     * every boot after the first is a no-op, and neither step ever throws.
+     */
+    void syncActivityIndexes().then(() => foldLegacyVendorActivity())
     /**
      * The `deliveries` collection was used once by an earlier delivery design
      * whose documents this module cannot read — and one of them made the trips

@@ -2,6 +2,9 @@ import type { QueryFilter, Types } from "mongoose";
 import type { ObjectStream } from "../../config/r2";
 import { requireStorage } from "../../config/r2";
 import { AppError } from "../../utils/app-error";
+import { changeSummary, changesBetween } from "../activity/activity.diff";
+import type { ActivityChange, FieldSpec } from "../activity/activity.diff";
+import { recordActivity } from "../activity/activity.recorder";
 import { UserModel } from "../user/user.model";
 import type { UserDocument } from "../user/user.model";
 import {
@@ -1491,6 +1494,62 @@ async function decideLocation(
  * Admin is inside that set; the rule is not loosened for this endpoint,
  * because setting where a delivery went is a statement about the record.
  */
+/**
+ * A challan flattened to the values a journal row would quote.
+ *
+ * The goods are one string rather than a field per line, for the reason the
+ * gate pass snapshot gives: lines are replaced wholesale, so they have no
+ * identity a diff could follow. The rates ride along with them because a
+ * correction re-prices, and "what did this delivery cost before somebody
+ * changed it" is the question a challan correction most often raises.
+ */
+function challanSnapshot(challan: ChallanDocument) {
+  return {
+    customerName: challan.customerName,
+    deliveryAddress: challan.deliveryAddress,
+    thana: challan.thana,
+    district: challan.district,
+    receiverMobile: challan.receiverMobile,
+    zonePo: challan.zonePo,
+    location: challan.resolvedLocation
+      ? `${challan.resolvedLocation.thana}, ${challan.resolvedLocation.district} (${challan.resolvedLocation.locationType})`
+      : null,
+    items: challan.items
+      .map(
+        (item) =>
+          `${item.productName} ${item.productModel} × ${item.qty}${
+            item.rate ? ` @ ${item.rate.amount}` : ""
+          }`,
+      )
+      .join("; "),
+  };
+}
+
+type ChallanSnapshot = ReturnType<typeof challanSnapshot>;
+
+const CHALLAN_FIELDS: FieldSpec<ChallanSnapshot>[] = [
+  { field: "customerName", label: "Customer" },
+  { field: "deliveryAddress", label: "Delivery address" },
+  { field: "thana", label: "Thana" },
+  { field: "district", label: "District" },
+  { field: "receiverMobile", label: "Receiver" },
+  { field: "zonePo", label: "Zone / PO" },
+  { field: "location", label: "Location" },
+  { field: "items", label: "Goods" },
+];
+
+function challanChanges(
+  before: Partial<ChallanSnapshot>,
+  after: Partial<ChallanSnapshot>,
+): ActivityChange[] {
+  return changesBetween(before, after, CHALLAN_FIELDS);
+}
+
+/** "LBTS-CH-2026-000123 · SL 10042 · Walton" — a row's own sentence. */
+function challanPhrase(challan: ChallanDocument): string {
+  return `${challan.challanNumber} · SL ${challan.slNumber} · ${challan.customerName}`;
+}
+
 export async function setChallanLocation(
   id: string,
   locationId: string | null,
@@ -1498,6 +1557,13 @@ export async function setChallanLocation(
 ): Promise<ChallanRecord> {
   const challan = await findChallan(id);
   assertCanEdit(challan, actor);
+
+  // Read before it moves: a location is replaced outright, so what it said is
+  // gone the moment this saves.
+  const locationBefore = challan.resolvedLocation
+    ? `${challan.resolvedLocation.thana}, ${challan.resolvedLocation.district}`
+    : null;
+  const sourceBefore = challan.resolvedLocation?.source ?? null;
 
   const fields = locationId
     ? await decideLocation(
@@ -1536,6 +1602,42 @@ export async function setChallanLocation(
   await challan.save();
   // The Trip DO sheet copies the district, thana, location and rates.
   await syncTripDoLedger([challan._id]);
+
+  /**
+   * Confirming an inferred location is a write rather than a flag — there is
+   * no `reviewedAt` field, because agreeing with the resolver is recorded by
+   * rewriting the source as `admin_manual`. That leaves the record unable to
+   * say whether a location was *settled* or merely *agreed with*, and unable
+   * to say what it said before. This row says both.
+   */
+  await recordActivity({
+    action: "challan.location",
+    entityType: "Challan",
+    entityId: challan._id,
+    entityLabel: challan.challanNumber,
+    summary: locationId
+      ? `${challan.challanNumber} located at ${fields.resolvedLocation?.thana ?? ""}, ${
+          fields.resolvedLocation?.district ?? ""
+        } (${fields.resolvedLocation?.locationType ?? ""})`
+      : `${challan.challanNumber} location cleared — its rates go with it`,
+    changes: [
+      {
+        field: "resolvedLocation",
+        label: "Location",
+        from: locationBefore,
+        to: fields.resolvedLocation
+          ? `${fields.resolvedLocation.thana}, ${fields.resolvedLocation.district}`
+          : null,
+      },
+      {
+        field: "resolvedLocation.source",
+        label: "Decided by",
+        from: sourceBefore,
+        to: fields.resolvedLocation?.source ?? null,
+      },
+    ],
+    actor,
+  });
 
   return serialize(challan);
 }
@@ -1868,6 +1970,24 @@ export async function submitChallan(
       syncTripDoLedger([challan._id]),
     ]);
 
+    /**
+     * Written only on a genuine submission. A replay of a completed key
+     * returns through `getSubmittedChallan` and never reaches here, for the
+     * reason the idempotency claim exists at all: the journal has to say one
+     * challan was filed, because one was.
+     */
+    await recordActivity({
+      action: "challan.created",
+      entityType: "Challan",
+      entityId: challan._id,
+      entityLabel: challan.challanNumber,
+      summary: `${challanPhrase(challan)} filed from pages ${challan.sourcePageStart}–${
+        challan.sourcePageEnd
+      }`,
+      changes: challanChanges({}, challanSnapshot(challan)),
+      actor,
+    });
+
     return { record: await serialize(challan, actor), wasAlreadySubmitted: false };
   } catch (error) {
     // The document was written but the record never was, so nothing points at
@@ -1930,6 +2050,8 @@ export async function updateChallan(
   assertCanEdit(challan, actor);
 
   const previousKey = challan.document.key;
+  // Read before the lines are replaced and re-priced.
+  const before = challanSnapshot(challan);
   const fields = normalizeFields(input);
 
   /**
@@ -2023,6 +2145,26 @@ export async function updateChallan(
 
   await discardChallanDocument(previousKey);
   await syncTripDoLedger([challan._id]);
+
+  const changes = challanChanges(before, challanSnapshot(challan));
+
+  /**
+   * The summary names the reprint, because that is the consequence. A
+   * correction sets the record to `Amended` and the banner says to reprint —
+   * but the record only ever holds the latest state, so a month later nothing
+   * says which correction made the printed copy out of date.
+   */
+  await recordActivity({
+    action: "challan.updated",
+    entityType: "Challan",
+    entityId: challan._id,
+    entityLabel: challan.challanNumber,
+    summary: `${challan.challanNumber} amended — ${changeSummary(changes)}${
+      challan.printedAt ? "; a printed copy is now out of date" : ""
+    }`,
+    changes,
+    actor,
+  });
 
   return serialize(challan);
 }
@@ -2135,12 +2277,32 @@ export async function removeChallan(
 
   const key = challan.document.key;
   const batchId = challan.batchId;
+  const snapshot = challanSnapshot(challan);
+  const phrase = challanPhrase(challan);
+  const pages = `${challan.sourcePageStart}–${challan.sourcePageEnd}`;
 
   await challan.deleteOne();
   await discardChallanDocument(key);
   await refreshBatchProgress(batchId);
   // Its rows leave the Trip DO sheet, Trip DOs and all.
   await syncTripDoLedger([challan._id]);
+
+  /**
+   * The SL and the challan number are in the row because a failed submission
+   * already burns its numbers and a deletion leaves a second gap — so "why is
+   * there no LBTS-CH-2026-000123" is a question somebody will ask, and this is
+   * the only place that can answer it. The pages go in too: they are released
+   * back to the batch by this delete, and the batch reopens as a result.
+   */
+  await recordActivity({
+    action: "challan.deleted",
+    entityType: "Challan",
+    entityId: challan._id,
+    entityLabel: challan.challanNumber,
+    summary: `${phrase} deleted — pages ${pages} of its source file are free again`,
+    changes: challanChanges(snapshot, {}),
+    actor,
+  });
 
   return { id: String(challan._id) };
 }
@@ -2176,6 +2338,8 @@ export async function setChallanPrinted(
 ): Promise<ChallanRecord> {
   const challan = await findChallan(id);
 
+  const wasPrinted = challan.printedAt !== null;
+
   challan.printedAt = printed ? new Date() : null;
   challan.printedBy = printed ? actor._id : null;
   await challan.save();
@@ -2183,6 +2347,27 @@ export async function setChallanPrinted(
   // Keeps the batch's denormalised count in step, so the batch page and the
   // record can never disagree about how much of a file has been printed.
   await refreshBatchProgress(challan.batchId);
+
+  /**
+   * Journalled only when it actually moves. Marking an already-marked challan
+   * is ordinary — reprinting is normal and nothing refuses it — and a row per
+   * press would fill the journal with a fact that did not change.
+   */
+  if (wasPrinted !== printed) {
+    await recordActivity({
+      action: "challan.printed",
+      entityType: "Challan",
+      entityId: challan._id,
+      entityLabel: challan.challanNumber,
+      summary: printed
+        ? `${challan.challanNumber} marked printed`
+        : `${challan.challanNumber} print mark cleared`,
+      changes: [
+        { field: "printedAt", label: "Printed", from: wasPrinted ? "Yes" : "No", to: printed ? "Yes" : "No" },
+      ],
+      actor,
+    });
+  }
 
   return serialize(challan);
 }

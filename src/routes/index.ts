@@ -1,5 +1,6 @@
 import { Router } from 'express'
 import { accountsRoutes } from '../modules/accounts/accounts.route'
+import { activityRoutes } from '../modules/activity/activity.route'
 import { administrationRoutes } from '../modules/administration/administration.route'
 import { billRoutes } from '../modules/bill/bill.route'
 import { challanBatchRoutes, challanRoutes } from '../modules/challan/challan.route'
@@ -108,6 +109,20 @@ const routes: RouteDefinition[] = [
    * that a trip with an advance against it cannot be deleted from Delivery.
    */
   { path: '/accounts', route: accountsRoutes },
+  /**
+   * The activity journal: who did what, across every module.
+   *
+   * Mounted at the top level rather than under whichever module writes the
+   * most rows, because it belongs to none of them — it is one append-only
+   * collection every service writes through `recordActivity`, and the whole
+   * point of it is that "a vehicle was deleted" and "a cash entry was
+   * corrected" are the same kind of fact filed in the same place.
+   *
+   * It is the only router here with **no write route at all**. Rows are
+   * appended by services; nothing a request can reach creates, edits or
+   * deletes one.
+   */
+  { path: '/activity', route: activityRoutes },
 ]
 
 const router = Router()

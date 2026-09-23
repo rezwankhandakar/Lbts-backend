@@ -1,7 +1,8 @@
 import type { QueryFilter, Types } from 'mongoose'
 import { AppError } from '../../utils/app-error'
-import { comparisonKey } from '../gate-pass/gate-pass.constants'
 import { nextSequence } from '../../utils/counter'
+import { recordActivity } from '../activity/activity.recorder'
+import { comparisonKey } from '../gate-pass/gate-pass.constants'
 import { TripDoLineModel } from '../trip-do/trip-do.model'
 import type { TripDoLineDocument } from '../trip-do/trip-do.model'
 import type { UserRole } from '../user/user.constants'
@@ -11,6 +12,7 @@ import {
   LABOUR_BILL_REVIEW_ROLES,
   formatLabourBillNumber,
   groupLabourLinesByCsd,
+  labourBillPeriodLabel,
   labourGroupLabel,
 } from './labour-bill.constants'
 import { labourCopyHashOf, labourCopyOf } from './labour-bill.copy'
@@ -458,6 +460,15 @@ export async function createLabourBill(
     createdBy: actor._id,
   })
 
+  await recordActivity({
+    action: 'labour-bill.created',
+    entityType: 'LabourBill',
+    entityId: bill._id,
+    entityLabel: bill.billNumber,
+    summary: `${bill.billNumber} opened for ${labourBillPeriodLabel(bill.month, bill.year)}`,
+    actor,
+  })
+
   return serializeLabourBill(bill)
 }
 
@@ -514,6 +525,24 @@ export async function deleteLabourBill(
 
   const removed = await LabourBillLineModel.deleteMany({ billId: bill._id })
   await bill.deleteOne()
+
+  /**
+   * No claim is released, unlike the Excel bill — this module claims nothing
+   * from the sheet, because a run is charged carriage by one bill and handling
+   * by the other. What goes is the typed figures, which exist nowhere else:
+   * what four men were paid to carry a fridge up three flights was typed into
+   * these rows and into nothing.
+   */
+  await recordActivity({
+    action: 'labour-bill.deleted',
+    entityType: 'LabourBill',
+    entityId: bill._id,
+    entityLabel: bill.billNumber,
+    summary: `${bill.billNumber} (${labourBillPeriodLabel(bill.month, bill.year)}) deleted — ${
+      removed.deletedCount ?? 0
+    } typed rows, ৳${bill.totalAmount.toLocaleString('en-BD')}`,
+    actor,
+  })
 
   return { id: String(bill._id), billNumber: bill.billNumber, removed: removed.deletedCount ?? 0 }
 }
@@ -576,6 +605,26 @@ export async function finalizeLabourBill(id: string, actor: UserDocument): Promi
   bill.finalizedBy = actor._id
   bill.updatedBy = actor._id
   await bill.save()
+
+  /**
+   * The figure goes in for the reason the Excel bill's does — and with one
+   * more: this bill is a **receivable**. Accounts reads what each CSD is owed
+   * live off these rows, so what the month claimed when it was signed off is
+   * a figure the sheet itself will not preserve once anybody reopens it.
+   */
+  await recordActivity({
+    action: 'labour-bill.finalized',
+    entityType: 'LabourBill',
+    entityId: bill._id,
+    entityLabel: bill.billNumber,
+    summary: `${bill.billNumber} finalized — ${bill.lineCount} rows, ৳${bill.totalAmount.toLocaleString('en-BD')}`,
+    changes: [
+      { field: 'status', label: 'Status', from: 'Draft', to: 'Finalized' },
+      { field: 'totalAmount', label: 'Total', from: null, to: String(bill.totalAmount) },
+    ],
+    actor,
+  })
+
   return serializeLabourBill(bill)
 }
 
@@ -591,5 +640,16 @@ export async function reopenLabourBill(id: string, actor: UserDocument): Promise
   bill.reopenedBy = actor._id
   bill.updatedBy = actor._id
   await bill.save()
+
+  await recordActivity({
+    action: 'labour-bill.reopened',
+    entityType: 'LabourBill',
+    entityId: bill._id,
+    entityLabel: bill.billNumber,
+    summary: `${bill.billNumber} reopened — it was finalized at ৳${bill.totalAmount.toLocaleString('en-BD')}`,
+    changes: [{ field: 'status', label: 'Status', from: 'Finalized', to: 'Draft' }],
+    actor,
+  })
+
   return serializeLabourBill(bill)
 }

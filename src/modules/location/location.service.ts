@@ -1,6 +1,8 @@
 import { config } from '../../config/index'
 import type { QueryFilter } from 'mongoose'
 import { AppError } from '../../utils/app-error'
+import { changeSummary, changesBetween } from '../activity/activity.diff'
+import { recordActivity } from '../activity/activity.recorder'
 import { ChallanModel } from '../challan/challan.model'
 import { UserModel } from '../user/user.model'
 import type { UserDocument } from '../user/user.model'
@@ -257,6 +259,16 @@ export async function createLocation(
   })
 
   invalidateMasterCache()
+
+  await recordActivity({
+    action: 'location.created',
+    entityType: 'Location',
+    entityId: location._id,
+    entityLabel: `${location.district} / ${location.thana}`,
+    summary: `${location.district} / ${location.thana} added to the master list as ${location.locationType}`,
+    actor,
+  })
+
   return serialize(location)
 }
 
@@ -278,6 +290,19 @@ export async function updateLocation(
   actor: UserDocument,
 ): Promise<LocationRecord> {
   const location = await findLocation(id)
+
+  /**
+   * Read before anything moves. A correction here reclassifies every challan
+   * pointing at the row — which is the whole reason a challan stores a
+   * reference — so what the row said before is the only record of what those
+   * challans used to read.
+   */
+  const before = {
+    district: location.district,
+    thana: location.thana,
+    locationType: location.locationType,
+    isActive: location.isActive,
+  }
 
   const district = input.district ?? location.district
   const thana = input.thana ?? location.thana
@@ -302,6 +327,24 @@ export async function updateLocation(
   await location.save()
 
   invalidateMasterCache()
+
+  const changes = changesBetween(before, location, [
+    { field: 'district', label: 'District' },
+    { field: 'thana', label: 'Thana' },
+    { field: 'locationType', label: 'Location type' },
+    { field: 'isActive', label: 'In use' },
+  ])
+
+  await recordActivity({
+    action: 'location.updated',
+    entityType: 'Location',
+    entityId: location._id,
+    entityLabel: `${location.district} / ${location.thana}`,
+    summary: `${before.district} / ${before.thana} corrected — ${changeSummary(changes)}`,
+    changes,
+    actor,
+  })
+
   return serialize(location)
 }
 
@@ -343,11 +386,40 @@ export async function removeLocation(
     }
 
     invalidateMasterCache()
+
+    /**
+     * One action for both outcomes, and the summary is what tells them apart.
+     * They are the same intent — somebody asked for this row to stop being
+     * used — and splitting them into two actions would put "removed" and
+     * "deactivated" in different filters when a reader looking for either
+     * wants both.
+     */
+    await recordActivity({
+      action: 'location.removed',
+      entityType: 'Location',
+      entityId: location._id,
+      entityLabel: `${location.district} / ${location.thana}`,
+      summary: `${location.district} / ${location.thana} deactivated instead of deleted — ${challanCount} challan${
+        challanCount === 1 ? '' : 's'
+      } reference it`,
+      changes: [{ field: 'isActive', label: 'In use', from: 'Yes', to: 'No' }],
+      actor,
+    })
+
     return { id: String(location._id), deactivated: true, challanCount }
   }
 
   await location.deleteOne()
   invalidateMasterCache()
+
+  await recordActivity({
+    action: 'location.removed',
+    entityType: 'Location',
+    entityId: location._id,
+    entityLabel: `${location.district} / ${location.thana}`,
+    summary: `${location.district} / ${location.thana} (${location.locationType}) deleted — nothing referenced it`,
+    actor,
+  })
 
   return { id: String(location._id), deactivated: false, challanCount: 0 }
 }

@@ -14,7 +14,7 @@ import {
   assertCanReadVendor,
   vendorFilterFor,
 } from './vendor.access'
-import { recordActivity, purgeActivity } from './vendor.activity'
+import { recordActivity } from './vendor.activity'
 import { allocateVendorCode } from './vendor.counter'
 import {
   canTransitionVendor,
@@ -649,8 +649,33 @@ export async function removeVendor(
    */
   await VendorDocumentModel.deleteMany({ vendorId: vendor._id })
   await vendor.deleteOne()
-  await purgeActivity(String(vendor._id))
   await discardVendorObject(vendor.photoKey)
+
+  /**
+   * The journal is **not** purged with the vendor, and this is the one place
+   * where promoting it into the application's audit log changed a behaviour
+   * rather than just its address.
+   *
+   * It used to be deleted, which made sense while the rows were a tab on the
+   * vendor's own page: nothing else would ever have read them. They are audit
+   * history now, and an audit history that disappears when its subject does is
+   * one that cannot answer the question anybody would actually ask about a
+   * deleted vendor. Every row already stores the labels and the actor's name
+   * as copies for exactly this case, so they still read with nothing to point
+   * at — which is the whole reason those are copies.
+   *
+   * So the deletion is recorded instead, last, once the record is actually
+   * gone.
+   */
+  await recordActivity({
+    vendorId: vendor._id,
+    action: 'vendor.deleted',
+    entityType: 'Vendor',
+    entityId: vendor._id,
+    entityLabel: vendor.name,
+    summary: `Vendor ${vendor.vendorCode} (${vendor.name}) deleted — nothing referenced it`,
+    actor,
+  })
 
   return {
     id: String(vendor._id),

@@ -173,7 +173,7 @@ export async function patchEntry(req: Request, res: Response): Promise<void> {
 }
 
 export async function removeEntry(req: Request, res: Response): Promise<void> {
-  const result = await deleteEntry(idFrom(req))
+  const result = await deleteEntry(idFrom(req), actorFrom(req))
   sendResponse(res, { statusCode: 200, message: `${result.entryNumber} deleted`, data: result })
 }
 

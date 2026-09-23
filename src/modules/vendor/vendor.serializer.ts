@@ -2,7 +2,6 @@ import type { Types } from 'mongoose'
 import type { AssignmentDocument } from './assignment.model'
 import type { DriverDocument } from './driver.model'
 import type { VehicleDocument } from './vehicle.model'
-import type { VendorActivityDocument } from './vendor-activity.model'
 import type { VendorDocumentDocument } from './vendor-document.model'
 import type { VendorDocument } from './vendor.model'
 import {
@@ -11,7 +10,6 @@ import {
   expiryPhrase,
 } from './vendor.constants'
 import type {
-  ActivityAction,
   AssignmentStatus,
   DocumentOwnerType,
   DocumentStatus,
@@ -452,30 +450,11 @@ export function toDocumentRecord(
 }
 
 // --- Activity --------------------------------------------------------------
-
-export interface ActivityRecord {
-  id: string
-  action: ActivityAction
-  entityType: string
-  entityId: string | null
-  entityLabel: string
-  summary: string
-  actor: ActorRef | null
-  createdAt: string
-}
-
-export function toActivityRecord(
-  entry: VendorActivityDocument,
-  actorNames: Map<string, string>,
-): ActivityRecord {
-  return {
-    id: String(entry._id),
-    action: entry.action as ActivityAction,
-    entityType: entry.entityType,
-    entityId: entry.entityId ? String(entry.entityId) : null,
-    entityLabel: entry.entityLabel,
-    summary: entry.summary,
-    actor: actorFrom(entry.actorId, actorNames),
-    createdAt: entry.createdAt.toISOString(),
-  }
-}
+//
+// An activity row is serialized by `activity.serializer.ts` now, not here.
+// The journal was promoted out of this module into the application's own —
+// see `vendor.activity.ts` — and the shape it answers with is wider than this
+// one was: it carries the module, the category, the severity and the actor's
+// role, none of which a vendor-only log had any use for. A second serializer
+// producing a narrower row for the same collection is exactly the kind of
+// thing that comes to disagree with the first about what a row means.
