@@ -2,6 +2,8 @@ import type { QueryFilter } from 'mongoose'
 import { getFirebaseAuth } from '../../config/firebase'
 import { AppError } from '../../utils/app-error'
 import { recordActivity } from '../activity/activity.recorder'
+import { notify } from '../notification/notification.recorder'
+import type { NotificationEvent } from '../notification/notification.constants'
 import { ADMIN_ROLE, canTransition } from '../user/user.constants'
 import type { UserRole, UserStatus } from '../user/user.constants'
 import { UserModel } from '../user/user.model'
@@ -299,7 +301,76 @@ export async function changeUserRole(
     actor,
   })
 
+  /**
+   * And the person it happened to is told.
+   *
+   * Addressed to the target rather than to a role, because this is the one
+   * category of message nobody may mute: a role change silently rewrites what
+   * somebody can see the next time they load the app, and a sidebar that has
+   * grown or shrunk without explanation is a support call. `assertNotSelf` has
+   * already proved the actor is not the recipient.
+   */
+  await notify({
+    event: 'account.role-changed',
+    audience: { kind: 'user', userId: target._id },
+    title: `Your role is now ${role}`,
+    body:
+      role === 'Vendor'
+        ? `You were ${previousRole} and are now linked to ${
+            vendorRefs.get(String(target.vendorId))?.name ?? 'a vendor'
+          }. What you can see has changed — sign out and back in if a page looks wrong.`
+        : `You were ${previousRole}. What you can see has changed — sign out and back in if a page looks wrong.`,
+    entityType: 'User',
+    entityId: target._id,
+    entityLabel: target.name,
+    actor,
+  })
+
   return toAdminUser(target, new Map([[String(actor._id), actor.name]]), vendorRefs)
+}
+
+/**
+ * Which announcement a lifecycle move is.
+ *
+ * Four statuses and three events, because the two ways into `Active` are one
+ * message: a Pending account being approved and a Suspended one being restored
+ * both mean "you can work now", and splitting them would be a distinction the
+ * recipient does not have and does not need. `Pending` itself is never a
+ * destination — `STATUS_TRANSITIONS` has no edge back into it — so it is absent
+ * rather than mapped to nothing.
+ */
+const STATUS_EVENTS: Partial<Record<UserStatus, NotificationEvent>> = {
+  Active: 'account.approved',
+  Rejected: 'account.rejected',
+  Suspended: 'account.suspended',
+}
+
+/** What the recipient is actually told, which is not the same as what changed. */
+function statusMessage(status: UserStatus, note: string | null): { title: string; body: string } {
+  const reason = note ? ` Reason: ${note}` : ''
+
+  switch (status) {
+    case 'Active':
+      return {
+        title: 'Your account has been approved',
+        body: 'You can sign in and use the system. What you can see depends on the role you have been given.',
+      }
+    case 'Rejected':
+      return {
+        title: 'Your account request was declined',
+        body: `You cannot use the system. Contact an administrator if this is wrong.${reason}`,
+      }
+    case 'Suspended':
+      return {
+        title: 'Your account has been suspended',
+        body: `You cannot use the system until an administrator restores it.${reason}`,
+      }
+    default:
+      return {
+        title: `Your account is now ${status}`,
+        body: reason.trim(),
+      }
+  }
 }
 
 export async function changeUserStatus(
@@ -352,6 +423,37 @@ export async function changeUserStatus(
     vendorId: target.vendorId ?? null,
     actor,
   })
+
+  /**
+   * And the account owner is told, with the reason if there was one.
+   *
+   * The note is repeated here deliberately: the record keeps exactly one, and
+   * reactivation clears it, so a suspension explained in March is a sentence
+   * this message is the only durable copy of *as far as the recipient is
+   * concerned* — the journal has it, and the journal is not something they can
+   * read.
+   *
+   * A suspended or rejected account cannot sign in, so this is a message waiting
+   * for them if the decision is ever reversed rather than one they read today.
+   * That is the correct shape: the alternative is inventing an email channel
+   * this application does not have, and saying nothing at all is what the system
+   * did before.
+   */
+  const event = STATUS_EVENTS[status]
+  if (event) {
+    const wording = statusMessage(status, target.statusNote)
+
+    await notify({
+      event,
+      audience: { kind: 'user', userId: target._id },
+      title: wording.title,
+      body: wording.body,
+      entityType: 'User',
+      entityId: target._id,
+      entityLabel: target.name,
+      actor,
+    })
+  }
 
   return toAdminUser(
     target,

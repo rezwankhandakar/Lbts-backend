@@ -3,6 +3,8 @@ import { AppError } from '../../utils/app-error'
 import { nextSequence } from '../../utils/counter'
 import { recordActivity } from '../activity/activity.recorder'
 import { comparisonKey } from '../gate-pass/gate-pass.constants'
+import { MONEY_AUDIENCE_ROLES } from '../notification/notification.constants'
+import { notify } from '../notification/notification.recorder'
 import { GatePassModel } from '../gate-pass/gate-pass.model'
 import { TripDoLineModel } from '../trip-do/trip-do.model'
 import type { TripDoLineDocument } from '../trip-do/trip-do.model'
@@ -412,6 +414,29 @@ export async function finalizeBill(id: string, actor: UserDocument): Promise<Bil
       { field: 'status', label: 'Status', from: 'Draft', to: 'Finalized' },
       { field: 'totalAmount', label: 'Total', from: null, to: String(bill.totalAmount) },
     ],
+    actor,
+  })
+
+  /**
+   * And the roles who read the books are told what was signed off.
+   *
+   * `MONEY_AUDIENCE_ROLES` is Accounts' own read audience rather than this
+   * module's, deliberately: the message carries an amount, and announcing a
+   * figure to somebody who may not read figures would be a leak by
+   * announcement. It also happens to be who needs it — a finalized Excel bill
+   * is what Walton is asked to audit, and the final bill Accounts is waiting for
+   * is the answer to this one.
+   */
+  await notify({
+    event: 'bill.finalized',
+    audience: { kind: 'roles', roles: MONEY_AUDIENCE_ROLES },
+    title: `${bill.billNumber} finalized — ৳${bill.totalAmount.toLocaleString('en-BD')}`,
+    body: `Unit ${bill.unit}, ${billPeriodLabel(bill.month, bill.year)} · ${bill.lineCount} ${
+      bill.lineCount === 1 ? 'row' : 'rows'
+    }, ${bill.totalQty} pcs. Record Walton's audited figure against it when it comes back.`,
+    entityType: 'Bill',
+    entityId: bill._id,
+    entityLabel: bill.billNumber,
     actor,
   })
 

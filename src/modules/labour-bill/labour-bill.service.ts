@@ -3,6 +3,8 @@ import { AppError } from '../../utils/app-error'
 import { nextSequence } from '../../utils/counter'
 import { recordActivity } from '../activity/activity.recorder'
 import { comparisonKey } from '../gate-pass/gate-pass.constants'
+import { MONEY_AUDIENCE_ROLES } from '../notification/notification.constants'
+import { notify } from '../notification/notification.recorder'
 import { TripDoLineModel } from '../trip-do/trip-do.model'
 import type { TripDoLineDocument } from '../trip-do/trip-do.model'
 import type { UserRole } from '../user/user.constants'
@@ -622,6 +624,28 @@ export async function finalizeLabourBill(id: string, actor: UserDocument): Promi
       { field: 'status', label: 'Status', from: 'Draft', to: 'Finalized' },
       { field: 'totalAmount', label: 'Total', from: null, to: String(bill.totalAmount) },
     ],
+    actor,
+  })
+
+  /**
+   * And Accounts is told, because this bill **is** a receivable the moment it is
+   * signed off.
+   *
+   * Unlike the Excel bill beside it, nothing audits a labour bill — the office
+   * works out what the handling cost row by row and that figure is the claim. So
+   * this announcement is not "a document is ready"; it is "there is money to
+   * collect", and the page that collects it reads these rows live.
+   */
+  await notify({
+    event: 'labour-bill.finalized',
+    audience: { kind: 'roles', roles: MONEY_AUDIENCE_ROLES },
+    title: `${bill.billNumber} finalized — ৳${bill.totalAmount.toLocaleString('en-BD')}`,
+    body: `${labourBillPeriodLabel(bill.month, bill.year)} · ${bill.lineCount} ${
+      bill.lineCount === 1 ? 'row' : 'rows'
+    }. Each CSD section is now a claim Walton can be asked to settle.`,
+    entityType: 'LabourBill',
+    entityId: bill._id,
+    entityLabel: bill.billNumber,
     actor,
   })
 

@@ -6,6 +6,8 @@ import { changeSummary, changesBetween, dayValue } from '../activity/activity.di
 import type { FieldSpec } from '../activity/activity.diff'
 import { recordActivity } from '../activity/activity.recorder'
 import { refreshBillingStatus } from '../bill/bill.status'
+import { GATE_PASS_REVIEW_AUDIENCE } from '../notification/notification.constants'
+import { notify } from '../notification/notification.recorder'
 import { UserModel } from '../user/user.model'
 import type { UserDocument } from '../user/user.model'
 import {
@@ -905,6 +907,26 @@ export async function submitGatePass(
     actor,
   })
 
+  /**
+   * And whoever reviews is told there is something to review.
+   *
+   * The review audience rather than the write audience, because this message is
+   * a request for a verdict and every one of those roles can give one. The
+   * submitter is excluded by `notify`, which in a one-person office means
+   * nothing is written at all — correct, and the reason the exclusion lives in
+   * the seam rather than at each call site.
+   */
+  await notify({
+    event: 'gate-pass.submitted',
+    audience: { kind: 'roles', roles: GATE_PASS_REVIEW_AUDIENCE },
+    title: `${record.gatePassId} is waiting to be verified`,
+    body: `${record.customerName} · Trip DO ${record.tripDo} · ${record.vehicleNo}. Check the values against the scan.`,
+    entityType: 'GatePass',
+    entityId: record._id,
+    entityLabel: record.gatePassId,
+    actor,
+  })
+
   return serialize(record)
 }
 
@@ -958,6 +980,39 @@ export async function reviewGatePass(
         ? [{ field: 'statusNote', label: 'Reason', from: null, to: record.statusNote }]
         : []),
     ],
+    actor,
+  })
+
+  /**
+   * And the verdict goes back to whoever filed it.
+   *
+   * Addressed to the **author** rather than to a role, and it is the one place
+   * in this module where authorship still decides anything: CLAUDE.md records
+   * that the per-record ownership scope came off every write here, so anybody
+   * may correct anybody's gate pass — but "your gate pass was sent back, and
+   * here is why" is a sentence with exactly one recipient, and broadcasting it
+   * to four roles would make the one person who has to act on it the least
+   * likely to notice.
+   *
+   * A sent-back gate pass carries the reviewer's note, and this is the only
+   * place it is put in front of the person who has to fix it — the record clears
+   * it on the next verification.
+   */
+  await notify({
+    event: input.status === 'Verified' ? 'gate-pass.verified' : 'gate-pass.rejected',
+    audience: { kind: 'user', userId: record.createdBy },
+    title:
+      input.status === 'Verified'
+        ? `${record.gatePassId} was verified`
+        : `${record.gatePassId} was sent back`,
+    body:
+      input.status === 'Verified'
+        ? `${record.customerName} · Trip DO ${record.tripDo}. The values match the scan.`
+        : `${record.customerName} · Trip DO ${record.tripDo}.` +
+          (record.statusNote ? ` ${record.statusNote}` : ' Correct it and submit it again.'),
+    entityType: 'GatePass',
+    entityId: record._id,
+    entityLabel: record.gatePassId,
     actor,
   })
 

@@ -8,6 +8,7 @@ import { deliveryRoutes } from '../modules/delivery/delivery.route'
 import { gatePassRoutes } from '../modules/gate-pass/gate-pass.route'
 import { labourBillRoutes } from '../modules/labour-bill/labour-bill.route'
 import { locationRoutes } from '../modules/location/location.route'
+import { notificationRoutes } from '../modules/notification/notification.route'
 import { productRateRoutes } from '../modules/product-rate/product-rate.route'
 import { profileRoutes } from '../modules/profile/profile.route'
 import { tripDoRoutes } from '../modules/trip-do/trip-do.route'
@@ -123,6 +124,23 @@ const routes: RouteDefinition[] = [
    * deletes one.
    */
   { path: '/activity', route: activityRoutes },
+  /**
+   * Notifications: what somebody needs to be told, as opposed to what happened.
+   *
+   * Mounted at the top level beside the journal, because it belongs to no module
+   * either — services announce through one seam (`notify`) exactly as they
+   * journal through one (`recordActivity`), and the point of both is that "an
+   * account is waiting for approval" and "a certificate has expired" are the
+   * same kind of fact filed in the same place.
+   *
+   * It is the only router with **no role check at all**, and that is its whole
+   * security model rather than a gap: every route reads the caller off the
+   * verified profile and no endpoint takes a user id, so there is nothing in any
+   * URL to aim at somebody else's inbox — the shape `/profile` takes. What keeps
+   * a `Vendor` account away from the operating modules' messages is the
+   * *audience*, decided when a message is written.
+   */
+  { path: '/notifications', route: notificationRoutes },
 ]
 
 const router = Router()

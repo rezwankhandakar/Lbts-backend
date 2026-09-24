@@ -2,6 +2,11 @@ import type { Types } from 'mongoose'
 import { AppError } from '../../utils/app-error'
 import { ChallanModel } from '../challan/challan.model'
 import { applyDeliveryItems } from '../challan/challan.service'
+import {
+  COMPLIANCE_AUDIENCE_ROLES,
+  OPERATIONS_AUDIENCE_ROLES,
+} from '../notification/notification.constants'
+import { notify } from '../notification/notification.recorder'
 import type { UserDocument } from '../user/user.model'
 import { recordActivity } from '../vendor/vendor.activity'
 import { resolveActorNames } from '../vendor/vendor.lookups'
@@ -193,6 +198,39 @@ export async function recordCompletion(
     actor,
   })
 
+  /**
+   * Goods back at the depot are announced, and nothing else on this screen is.
+   *
+   * A floor number and a carrying charge are facts about a delivery that is
+   * over; returned pieces are a **job**, and the distinction is the one
+   * `attention.ts` draws on the dashboard between a reading and something
+   * outstanding. The challan goes back to `Pending` with those pieces on a
+   * shelf, and whoever loads tomorrow's lorry has no way of learning that short
+   * of filtering the Challan list for it — which is a question somebody has to
+   * think to ask.
+   *
+   * Only when something actually came back: a call that records a floor number
+   * and no return has nothing to announce, and re-saving the same screen must
+   * not ring the bell twice. There is deliberately no `groupKey` — a second
+   * return recorded on the same trip *is* a second thing to be told about, and
+   * the sweep's deduplication would swallow it.
+   */
+  if (returnedQty > 0) {
+    await notify({
+      event: 'delivery.goods-returned',
+      audience: { kind: 'roles', roles: OPERATIONS_AUDIENCE_ROLES },
+      title: `${returnedQty} ${returnedQty === 1 ? 'piece' : 'pieces'} came back on ${trip.tripNumber}`,
+      body:
+        `${challan.challanNumber}: ` +
+        returned.map((line) => `${line.qty} × ${line.productName}`).join(', ') +
+        `. The challan is waiting for a lorry again.`,
+      entityType: 'Trip',
+      entityId: trip._id,
+      entityLabel: trip.tripNumber,
+      actor,
+    })
+  }
+
   return serialize(trip)
 }
 
@@ -357,6 +395,32 @@ export async function markCopyMissing(
       summary:
         `${challan.challanNumber} on ${trip.tripNumber} completed without a signed copy` +
         (reason ? `: ${reason}` : ''),
+      actor,
+    })
+
+    /**
+     * And the two roles who chase paper are told.
+     *
+     * This is the one statement in the whole delivery flow an operator can make
+     * **without evidence** — every other completion rests on a scanned copy —
+     * so it is the one that wants a second pair of eyes. The operator who
+     * declared it is excluded, because they already know; that is exactly why
+     * this is addressed to a role rather than to them.
+     *
+     * Guarded on `wasComplete` alongside the journal row, so withdrawing and
+     * re-declaring does not announce the same lost sheet twice.
+     */
+    await notify({
+      event: 'delivery.copy-missing',
+      audience: { kind: 'roles', roles: COMPLIANCE_AUDIENCE_ROLES },
+      title: `No signed copy for ${challan.challanNumber}`,
+      body:
+        `Closed on ${trip.tripNumber} without the receiver's copy.` +
+        (reason ? ` Reason: ${reason}` : '') +
+        ' Filing a copy later clears this.',
+      entityType: 'Trip',
+      entityId: trip._id,
+      entityLabel: trip.tripNumber,
       actor,
     })
   }

@@ -1,5 +1,7 @@
 import type { DecodedIdToken } from 'firebase-admin/auth'
 import { recordActivity } from '../activity/activity.recorder'
+import { APPROVAL_AUDIENCE_ROLES } from '../notification/notification.constants'
+import { notify } from '../notification/notification.recorder'
 import { DEFAULT_USER_ROLE, DEFAULT_USER_STATUS } from './user.constants'
 import { UserModel } from './user.model'
 import type { UserDocument } from './user.model'
@@ -103,6 +105,33 @@ export async function syncUserProfile(
       entityId: user._id,
       entityLabel: user.name,
       summary: `${user.name} (${user.email}) signed up — created as ${user.role}, ${user.status}`,
+      actor: user,
+    })
+
+    /**
+     * And the announcement, which is the gap CLAUDE.md named twice: "an Admin
+     * who never opens the dashboard still learns about a waiting account only by
+     * going to look". Now they are told.
+     *
+     * Guarded on `upserted` alongside the journal row, or the session listener —
+     * which calls this endpoint on **every page load** — would announce the same
+     * account forever. Addressed to whoever can actually approve it, because a
+     * message about a decision nobody reading it may make is a message that
+     * teaches people to stop reading.
+     */
+    await notify({
+      event: 'account.pending',
+      audience: { kind: 'roles', roles: APPROVAL_AUDIENCE_ROLES },
+      title: `${user.name} is waiting for account approval`,
+      body: `${user.email} signed up and cannot use the system until an administrator approves the account and assigns a role.`,
+      entityType: 'User',
+      entityId: user._id,
+      entityLabel: user.name,
+      /**
+       * The actor is the person who signed up, which is the honest reading —
+       * nobody granted this. They cannot be in the Admin audience, so the
+       * exclusion `notify` applies costs nothing and says the right thing.
+       */
       actor: user,
     })
   }

@@ -29,6 +29,11 @@ import {
   syncDeliveryIndexes,
 } from './modules/delivery/delivery.migration'
 import { seedLocationMaster } from './modules/location/location.seed'
+import { startComplianceSweep, stopComplianceSweep } from './modules/notification/notification.compliance'
+import {
+  purgeOrphanedNotifications,
+  syncNotificationIndexes,
+} from './modules/notification/notification.migration'
 import {
   foldLegacyGatePassProducts,
   purgeCancelledGatePasses,
@@ -41,6 +46,11 @@ let server: Server | undefined
 
 function shutdown(signal: string): void {
   console.log(`[server] ${signal} received, shutting down`)
+
+  // The compliance sweep's interval is unref'd, so it could never hold the
+  // process open — but a sweep that starts while the connection is closing
+  // would log a failure nobody needs to read.
+  stopComplianceSweep()
 
   const finish = () => {
     disconnectDatabase()
@@ -115,6 +125,22 @@ function start(): void {
      * every boot after the first is a no-op, and neither step ever throws.
      */
     void syncActivityIndexes().then(() => foldLegacyVendorActivity())
+    /**
+     * Notifications. The TTL index first, for the reason the journal's comes
+     * first — MongoDB will not change an existing one's expiry on its own — then
+     * the messages addressed to accounts that no longer exist, and only then the
+     * compliance sweep.
+     *
+     * The sweep is last because it *writes* messages, and there is no point
+     * announcing a lapsed certificate into a collection whose retention has not
+     * been corrected yet. It is also the one scheduled job in this application:
+     * a certificate expiring is the calendar rather than a request, so nothing
+     * else would ever notice. See `notification.compliance.ts` for why a timer
+     * rather than a cron, on a host that spins the process down.
+     */
+    void syncNotificationIndexes()
+      .then(() => purgeOrphanedNotifications())
+      .then(() => startComplianceSweep())
     /**
      * The `deliveries` collection was used once by an earlier delivery design
      * whose documents this module cannot read — and one of them made the trips

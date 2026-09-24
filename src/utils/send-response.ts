@@ -72,6 +72,14 @@ export interface ResponseMeta {
   /** Bills: matching bills still being prepared, and signed off. */
   draftBills?: number
   finalizedBills?: number
+  /**
+   * Notifications: unread across the **whole** inbox rather than within the
+   * filters — the one total in this file that deliberately ignores them. It is
+   * the badge's figure, so a reader who has filtered to one category still sees
+   * that four other things arrived; `total` beside it is the filtered count, so
+   * paging stays honest.
+   */
+  unreadTotal?: number
 }
 
 interface SuccessPayload<T> {

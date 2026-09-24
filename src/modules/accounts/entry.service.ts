@@ -6,6 +6,8 @@ import { changeSummary, changesBetween, takaValue } from '../activity/activity.d
 import type { FieldSpec } from '../activity/activity.diff'
 import { recordActivity } from '../activity/activity.recorder'
 import { DeliveryModel } from '../delivery/delivery.model'
+import { MONEY_AUDIENCE_ROLES } from '../notification/notification.constants'
+import { notify } from '../notification/notification.recorder'
 import type { UserDocument } from '../user/user.model'
 import { escapeRegex } from '../vendor/vendor.lookups'
 import { VendorModel } from '../vendor/vendor.model'
@@ -408,6 +410,39 @@ export async function createEntry(
     vendorId: entry.vendorId ?? null,
     actor,
   })
+
+  /**
+   * One kind of entry is announced, and only one.
+   *
+   * **A vendor payment**, because of the rule CLAUDE.md states plainly: Accounts
+   * is the one module where `Admin` cannot write. Keeping the books is one
+   * person's job, which means the other two roles who *read* them have no way of
+   * learning that a vendor was paid short of opening the page and looking. This
+   * is the message that closes that gap, and its audience is exactly Accounts'
+   * own readers — the Manager who wrote it is excluded by `notify`, so it lands
+   * with the two people who did not already know.
+   *
+   * Every other kind is deliberately silent. A cash book is written up daily;
+   * announcing each expense would produce precisely the bell nobody looks at,
+   * and the journal already has all of them.
+   *
+   * Inside the insert-only branch, so a replayed submission never announces the
+   * same payment twice — the rule the idempotency claim itself follows.
+   */
+  if (record.kind === 'VendorPayment') {
+    await notify({
+      event: 'accounts.vendor-paid',
+      audience: { kind: 'roles', roles: MONEY_AUDIENCE_ROLES },
+      title: `${record.vendor?.name ?? 'A vendor'} paid ৳${record.amount.toLocaleString('en-BD')}`,
+      body: `${record.entryNumber}${
+        record.period ? ` · for ${record.period.label}` : ''
+      } · recorded by ${actor.name}${record.reference ? ` · ref ${record.reference}` : ''}.`,
+      entityType: 'AccountsEntry',
+      entityId: entry._id,
+      entityLabel: record.entryNumber,
+      actor,
+    })
+  }
 
   return { entry: record, replayed: false }
 }
