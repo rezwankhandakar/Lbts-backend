@@ -1,28 +1,29 @@
 import type { Types } from 'mongoose'
 import { recordActivity as appendActivity } from '../activity/activity.recorder'
-import { listVendorActivity } from '../activity/activity.service'
-import type { ActivityRecord } from '../activity/activity.serializer'
 import type { UserDocument } from '../user/user.model'
-import { MAX_ACTIVITY_ENTRIES } from './vendor.constants'
 import type { ActivityAction, ActivityEntityType } from './vendor.constants'
 
 /**
  * The vendor module's way into the application's journal.
  *
- * This file used to own a collection. CLAUDE.md described it as "the minimum
- * audit integration, not an audit system" — one append-only collection scoped
- * to a vendor, written by this module and read by its own endpoint — and said
- * outright that it was kept "so that module inherits a complete history" when
- * an Activity module arrived. It has, and this is the inheritance: the rows
- * live in the central journal now, the legacy ones folded in under their own
- * ids by `activity.migration.ts`, and what is left here is a **seam**.
+ * This file used to own a collection, and then — briefly — both halves of a
+ * journal: the write that fed the central Activity module and a read that
+ * served an Activity tab on the vendor workspace. The tab is gone, because the
+ * business asked for it off: a vendor page is for the fleet, the drivers, the
+ * documents and the trips, and "what was done to this vendor" is a question the
+ * Activity Logs module answers for every module at once rather than one the
+ * vendor page should answer a second time.
+ *
+ * So what is left is a **write seam and nothing else**. Every vendor and trip
+ * event is still journalled, exactly as before — removing a tab is not a reason
+ * to stop recording what happened, and `/activity` is where those rows are read,
+ * filtered by this module like any other.
  *
  * It stays a seam rather than becoming twenty-six imports of the central
  * recorder, for two reasons. Every call site in this module and in Delivery
  * passes a `vendorId`, which is this module's scope and nobody else's; and
  * keeping one door means the vendor actions cannot start being written without
- * it. Nothing else changed — the twenty-six callers are untouched, and
- * `recordActivity` still never throws.
+ * it. `recordActivity` still never throws.
  */
 
 export interface ActivityInput {
@@ -50,16 +51,4 @@ export async function recordActivity(input: ActivityInput): Promise<void> {
     vendorId: input.vendorId,
     actor: input.actor,
   })
-}
-
-/**
- * The newest entries for one vendor.
- *
- * No actor lookup any more: the journal stores each actor's name and role as
- * copies, so a page of rows costs one query rather than two — and a row
- * written by somebody whose account has since been deleted still says who did
- * it, which the old `$in` over the user collection could not.
- */
-export async function listActivity(vendorId: string, limit: number): Promise<ActivityRecord[]> {
-  return listVendorActivity(vendorId, Math.min(limit, MAX_ACTIVITY_ENTRIES))
 }

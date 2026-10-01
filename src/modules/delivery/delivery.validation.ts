@@ -11,6 +11,7 @@ import {
   MAX_TRIP_CHARGE,
   TRIP_BILL_FILTERS,
   MAX_TRIP_LINES,
+  MAX_TRIP_NOTE_LENGTH,
   MAX_TRIP_PAGE_SIZE,
   TRIP_STATUSES,
 } from './delivery.constants'
@@ -320,7 +321,28 @@ const tripCharge = (label: string) =>
  * A trip's rent and labour bill. Both are sent every time — a whole replace,
  * like every other small edit in this module — and `null` clears one.
  */
+/**
+ * A trip and one note on it. The note is addressed by its own id, never by a
+ * position in the array — removing the second note would renumber the third.
+ */
+export const tripNoteParamSchema = z.object({ id: objectId, noteId: objectId })
+export type TripNoteParams = z.infer<typeof tripNoteParamSchema>
+
+/**
+ * One note added to a trip.
+ *
+ * The author and the moment are deliberately absent: both come off the
+ * authenticated profile and the server's clock, for the reason no request in
+ * this module may name a user id. There is nothing else to send — a note is a
+ * sentence, and anything it needs to be *about* is the trip it was added to.
+ */
+export const tripNoteSchema = z.object({
+  text: text(1, MAX_TRIP_NOTE_LENGTH, 'Note'),
+})
+export type TripNoteInput = z.infer<typeof tripNoteSchema>
+
 export const tripBillSchema = z.object({
+
   tripRent: tripCharge('Trip rent'),
   labourBill: tripCharge('Labour bill'),
 })

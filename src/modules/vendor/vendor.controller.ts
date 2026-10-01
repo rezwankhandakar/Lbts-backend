@@ -49,7 +49,6 @@ import { getVendorTripFigures } from '../delivery/delivery.vendor-dashboard'
 import { tripAdvanceEntries, tripAdvancesFor, vendorMonthlyBill } from '../accounts/vendor-trip-money'
 import type { VendorTripsQuery } from '../delivery/delivery.validation'
 import { VENDOR_DASHBOARD_MONTHS, VENDOR_DASHBOARD_TRIPS } from './vendor.constants'
-import { listActivity } from './vendor.activity'
 import { ownVendorIdOf } from './vendor.access'
 import {
   changeVendorStatus,
@@ -63,7 +62,6 @@ import {
   updateVendor,
 } from './vendor.service'
 import type {
-  ActivityQuery,
   CreateAssignmentInput,
   CreateDocumentInput,
   CreateDriverInput,
@@ -181,22 +179,6 @@ export async function getSummary(req: Request, res: Response): Promise<void> {
     statusCode: 200,
     message: 'Vendor overview retrieved',
     data: await getVendorSummary(idFrom(req), actorFrom(req)),
-  })
-}
-
-export async function getActivity(req: Request, res: Response): Promise<void> {
-  const query = req.validated?.query as ActivityQuery
-  const actor = actorFrom(req)
-  const id = idFrom(req)
-
-  // Scope first: the activity log is not a back door into a vendor whose
-  // records the caller may not read.
-  await getVendor(id, actor)
-
-  sendResponse(res, {
-    statusCode: 200,
-    message: 'Activity retrieved',
-    data: await listActivity(id, query.limit),
   })
 }
 

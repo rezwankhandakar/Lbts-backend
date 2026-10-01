@@ -13,6 +13,7 @@ import {
   recordCompletion,
 } from './delivery.completion'
 import { recordTripBill } from './delivery.bill'
+import { addTripNote, removeTripNote } from './delivery.notes'
 import {
   buildCandidates,
   findByScan,
@@ -47,6 +48,8 @@ import type {
   StatsQuery,
   TripBillInput,
   TripChallanParams,
+  TripNoteInput,
+  TripNoteParams,
   TripScanQuery,
   UpdateTripInput,
   VehicleSearchQuery,
@@ -260,7 +263,37 @@ export async function patchTripBill(req: Request, res: Response): Promise<void> 
   })
 }
 
-export async function putCopyMissing(req: Request, res: Response): Promise<void> {
+/** A trip and one note on it, as the removal endpoint is addressed. */
+function noteTargetFrom(req: Request): TripNoteParams {
+  const params = req.validated?.params as TripNoteParams | undefined
+  if (!params) {
+    throw new AppError(400, 'Invalid id.')
+  }
+  return params
+}
+
+export async function postTripNote(req: Request, res: Response): Promise<void> {
+  const input = req.validated?.body as TripNoteInput
+
+  sendResponse(res, {
+    statusCode: 201,
+    message: 'Note added',
+    data: await addTripNote(idFrom(req), input, actorFrom(req)),
+  })
+}
+
+export async function deleteTripNote(req: Request, res: Response): Promise<void> {
+  const { id, noteId } = noteTargetFrom(req)
+
+  sendResponse(res, {
+    statusCode: 200,
+    message: 'Note removed',
+    data: await removeTripNote(id, noteId, actorFrom(req)),
+  })
+}
+
+export async function putCopyMissing(
+req: Request, res: Response): Promise<void> {
   const { id, challanId } = targetFrom(req)
   const input = req.validated?.body as CopyMissingInput
 

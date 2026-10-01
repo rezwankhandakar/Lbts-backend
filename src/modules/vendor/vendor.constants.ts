@@ -446,9 +446,6 @@ export function normalizeMobile(value: string): string {
 /** Rows one list page may return. */
 export const MAX_VENDOR_PAGE_SIZE = 50
 
-/** How many activity entries one read returns. */
-export const MAX_ACTIVITY_ENTRIES = 50
-
 /**
  * How many alerts the summary endpoint will report.
  *

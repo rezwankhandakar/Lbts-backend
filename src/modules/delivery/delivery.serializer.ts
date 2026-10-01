@@ -236,7 +236,20 @@ export interface TripChallanRecord extends TripPartyFields {
   changedLines: number
 }
 
+/**
+ * One note off the trip's log. `canRemove` is deliberately absent: who may
+ * take a note off is the same question as who may change the trip, which the
+ * client already knows from the trip itself.
+ */
+export interface TripNoteRecord {
+  id: string
+  text: string
+  createdBy: ActorRef | null
+  createdAt: string
+}
+
 export interface TripRecord {
+
   id: string
   tripNumber: string
   vendorTripSerial: number
@@ -274,6 +287,13 @@ export interface TripRecord {
   challanPreview: { challanNumber: string; customerName: string }[]
   /** Present on a single record; absent from a list page. */
   challans?: TripChallanRecord[]
+  /**
+   * The trip's note log, newest first. Present on a single record only, for
+   * the reason the challans are: a page of twenty trips has no use for them
+   * and would carry every word of every one.
+   */
+  notes?: TripNoteRecord[]
+
 
   /** Derived from the challans: set when the last signed copy came in. */
   completedAt: string | null
@@ -540,7 +560,25 @@ export function toTripRecord(
       challanNumber: challan.challanNumber,
       customerName: challan.customerName,
     })),
-    ...(withChallans ? { challans } : {}),
+    ...(withChallans
+      ? {
+          challans,
+          /**
+           * Newest first, because that is the only order anybody reads a log
+           * in. Stored in the order they were written — appending is what
+           * makes it a log — so the reversal belongs here rather than in the
+           * collection or in every reader.
+           */
+          notes: [...trip.notes]
+            .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+            .map((note) => ({
+              id: String(note._id),
+              text: note.text,
+              createdBy: actorFrom(note.createdBy, names),
+              createdAt: note.createdAt.toISOString(),
+            })),
+        }
+      : {}),
 
     completedAt: toIso(trip.completedAt),
     completedChallans: challans.filter((challan) => challan.outcome === 'Complete').length,

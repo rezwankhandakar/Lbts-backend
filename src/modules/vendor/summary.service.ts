@@ -178,8 +178,9 @@ export async function getVendorSummary(
    * The two lists underneath the numbers, fetched in parallel with each other
    * and reusing the list services rather than growing a second set of queries —
    * so a summary can never describe a set of records the tabs would disagree
-   * with. Recent activity used to be a third; it left the overview with the
-   * Activity tab, and is still recorded for the Activity module to read.
+   * with. Recent activity used to be a third and is not coming back: there is
+   * no activity read anywhere in this module now. The rows are still written,
+   * and the Activity Logs module is where they are read.
    */
   const [expiring, recent] = await Promise.all([
     listDocuments(

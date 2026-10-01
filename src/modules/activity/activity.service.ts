@@ -416,25 +416,6 @@ export async function listActivityActors(): Promise<ActivityActor[]> {
 }
 
 /**
- * One vendor's journal, newest first.
- *
- * The read `GET /vendors/:id/activity` has always served, now answered from
- * the central collection. It stays in this module rather than in Vendor
- * because the collection is one journal, and a second reader of it would be a
- * second place to get "what does a row mean" wrong.
- */
-export async function listVendorActivity(
-  vendorId: string,
-  limit: number,
-): Promise<ActivityRecord[]> {
-  const entries = await ActivityModel.find({ scopeVendorId: new Types.ObjectId(vendorId) })
-    .sort({ createdAt: -1, _id: -1 })
-    .limit(limit)
-
-  return entries.map(toActivityRecord)
-}
-
-/**
  * Every action the journal recognises, with what each one means.
  *
  * Served rather than mirrored blind, so the client's action filter offers the

@@ -72,6 +72,7 @@ export async function serialize(trip: DeliveryDocument): Promise<TripRecord> {
     trip.updatedBy,
     trip.billUpdatedBy,
     ...trip.challans.map((challan) => challan.completedBy),
+    ...trip.notes.map((note) => note.createdBy),
   ])
   return toTripRecord(trip, names, { withChallans: true })
 }

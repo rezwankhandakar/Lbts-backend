@@ -85,6 +85,7 @@ async function serializeMany(
       trip.updatedBy,
       trip.billUpdatedBy,
       ...trip.challans.map((challan) => challan.completedBy),
+      ...trip.notes.map((note) => note.createdBy),
     ]),
   )
   return trips.map((trip) => toTripRecord(trip, names, { withChallans }))

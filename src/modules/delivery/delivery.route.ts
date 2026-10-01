@@ -10,6 +10,7 @@ import {
   deleteCopyMissing,
   deleteReceivedCopyFile,
   deleteTrip,
+  deleteTripNote,
   getChallanCandidates,
   getChallanDispatchOne,
   getChallanScan,
@@ -28,6 +29,7 @@ import {
   postDriverPhoto,
   postReceivedCopy,
   postTrip,
+  postTripNote,
   putCopyMissing,
 } from './delivery.controller'
 import {
@@ -45,6 +47,8 @@ import {
   statsQuerySchema,
   tripBillSchema,
   tripChallanParamSchema,
+  tripNoteParamSchema,
+  tripNoteSchema,
   updateTripSchema,
   vehicleSearchQuerySchema,
 } from './delivery.validation'
@@ -236,7 +240,29 @@ router.patch(
 )
 
 /**
+ * The trip's note log. Open to the same writers as the trip and deliberately
+ * not gated on the trip being open, for the reason the bill is not: what
+ * somebody has to say about a run is usually said after the lorry is back.
+ *
+ * A note is added or removed and never edited, which is why there is no PATCH
+ * here — a log somebody can rewrite is one nobody can rely on.
+ */
+router.post(
+  '/:id/notes',
+  canWrite,
+  validateRequest({ params: idParamSchema, body: tripNoteSchema }),
+  postTripNote,
+)
+router.delete(
+  '/:id/notes/:noteId',
+  canWrite,
+  validateRequest({ params: tripNoteParamSchema }),
+  deleteTripNote,
+)
+
+/**
  * The signed copy is lost: complete the delivery on that statement, or take
+
  * the statement back. A PUT because declaring it twice is declaring it once.
  */
 router.put(

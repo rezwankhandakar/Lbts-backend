@@ -411,12 +411,6 @@ export type ListDocumentsQuery = z.infer<typeof listDocumentsQuerySchema>
 
 // --- Shared ----------------------------------------------------------------
 
-/** The activity feed, which is only ever "the newest N for this vendor". */
-export const activityQuerySchema = z.object({
-  limit: z.coerce.number().int().min(1).max(50).default(20),
-})
-export type ActivityQuery = z.infer<typeof activityQuerySchema>
-
 /**
  * The vendor dashboard, which asks for exactly one thing: the viewer's own
  * calendar day.

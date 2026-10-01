@@ -15,7 +15,6 @@ import {
   deleteVehicle,
   deleteVendor,
   deleteVendorPhoto,
-  getActivity,
   deleteVehiclePhoto,
   getAssignableDrivers,
   getAssignableVehicles,
@@ -59,7 +58,6 @@ import {
   postVendorPhoto,
 } from './vendor.controller'
 import {
-  activityQuerySchema,
   createAssignmentSchema,
   createDocumentSchema,
   createDriverSchema,
@@ -179,11 +177,6 @@ vendors.get(
   getVendorTrips,
 )
 vendors.get('/:id/trips/:tripId', validateRequest({ params: vendorTripParamSchema }), getVendorTrip)
-vendors.get(
-  '/:id/activity',
-  validateRequest({ params: idParamSchema, query: activityQuerySchema }),
-  getActivity,
-)
 
 vendors.patch(
   '/:id',

@@ -451,10 +451,9 @@ export function toDocumentRecord(
 
 // --- Activity --------------------------------------------------------------
 //
-// An activity row is serialized by `activity.serializer.ts` now, not here.
-// The journal was promoted out of this module into the application's own —
-// see `vendor.activity.ts` — and the shape it answers with is wider than this
-// one was: it carries the module, the category, the severity and the actor's
-// role, none of which a vendor-only log had any use for. A second serializer
-// producing a narrower row for the same collection is exactly the kind of
-// thing that comes to disagree with the first about what a row means.
+// Nothing here serializes an activity row, and this module no longer reads one.
+// It still *writes* them — `vendor.activity.ts` is the seam — but the Activity
+// Logs module is the only place a journal row is read and presented, so the
+// shape of one is entirely that module's business. There was briefly a tab
+// here that composed its feed; the business asked for it off, and nothing in
+// this module asks the journal a question any more.

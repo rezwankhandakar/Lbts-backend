@@ -484,3 +484,24 @@ export const MAX_TRIP_CHALLANS = 100
 export const MAX_TRIP_LINES = 40
 
 export const MAX_TRIP_PAGE_SIZE = 50
+
+/**
+ * The trip's note log.
+ *
+ * A trip is worked by several people over several days — loaded in the
+ * morning, part of it returned in the afternoon, the vendor's bill arriving a
+ * week later — so what somebody needs to say about it is not one value to be
+ * overwritten. Each note is appended with its author and its moment, and the
+ * log is append-only: a note is added or removed, never rewritten, because a
+ * log somebody can edit is one nobody can rely on.
+ *
+ * Bounded rather than unbounded, like every array stored inside a document
+ * here: the notes travel with the trip on every read of it, so a trip carrying
+ * five hundred of them would make its own page expensive. At the ceiling the
+ * oldest is what has to go, and the operator is told rather than silently
+ * losing one.
+ */
+export const MAX_TRIP_NOTES = 50
+
+/** One note's length. The same ceiling the trip's own `note` field carries. */
+export const MAX_TRIP_NOTE_LENGTH = 600

@@ -255,8 +255,26 @@ export const config = {
      * A PEM key spans multiple lines. Dashboards and .env files carry it as a
      * single line with literal "\n" sequences, which must be turned back into
      * real newlines or the SDK rejects the credential.
+     *
+     * The escape in the pattern is load-bearing. `/\n/` matches a real newline,
+     * so replacing those with themselves is a no-op — and the no-op is
+     * invisible in development, because dotenv expands `\n` inside a
+     * double-quoted .env value itself and the key already has real newlines by
+     * the time it is read. On Render the value arrives from the dashboard with
+     * no dotenv in front of it, keeps its literal backslash-n, and
+     * firebase-admin then fails every request with "Invalid PEM formatted
+     * message". `/\\n/` is what matches the two characters actually there.
+     *
+     * The surrounding quotes go too. A .env file needs them to carry a value
+     * with newlines in it and dotenv strips them on the way out; a dashboard
+     * field needs none and strips nothing, so a key pasted across with the
+     * quotes still attached would reach the SDK with a `"` where the PEM
+     * header has to begin.
      */
-    privateKey: parsed.data.FIREBASE_PRIVATE_KEY.replace(/\n/g, '\n'),
+    privateKey: parsed.data.FIREBASE_PRIVATE_KEY.replace(/^["']|["']$/g, '').replace(
+      /\\n/g,
+      '\n',
+    ),
   },
   /** null when the deployment carries no Cloudflare R2 credentials. */
   r2,

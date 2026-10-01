@@ -12,6 +12,8 @@ import {
   MAX_TRIP_CHALLANS,
   MAX_TRIP_CHARGE,
   MAX_TRIP_LINES,
+  MAX_TRIP_NOTES,
+  MAX_TRIP_NOTE_LENGTH,
   RECEIVED_COPY_MIME_TYPES,
   TRIP_STATUSES,
   carryingTotalOf,
@@ -307,6 +309,28 @@ const assignedDriverCopySchema = new Schema(
   { _id: false },
 )
 
+/**
+ * One note somebody wrote about this trip.
+ *
+ * Append-only: a note is added or removed, never rewritten, which is what
+ * separates a log from a field. The author's name is resolved on the way out
+ * like every other actor on a trip rather than copied in — the Delivery module
+ * resolves `createdBy`, `updatedBy` and `completedBy` the same way, and a
+ * second convention here would be one more thing to keep in step.
+ *
+ * It keeps its `_id`, unlike every other sub-document on a trip: a note is the
+ * one of them a request addresses on its own, and a position in an array is
+ * not an identity — removing the second note would renumber the third.
+ */
+const tripNoteSchema = new Schema(
+  {
+    text: { type: String, required: true, trim: true, maxlength: MAX_TRIP_NOTE_LENGTH },
+    createdBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    createdAt: { type: Date, required: true },
+  },
+  { _id: true },
+)
+
 const deliverySchema = new Schema(
   {
     /** `V-0007-TRIP-0012`. See `formatTripNumber`. */
@@ -333,6 +357,25 @@ const deliverySchema = new Schema(
     /** The calendar day the trip runs. Stored at UTC midnight, like every day here. */
     tripDate: { type: Date, required: true },
     note: { type: String, default: '', trim: true, maxlength: 600 },
+
+    /**
+     * The trip's note log — see `tripNoteSchema`.
+     *
+     * Beside `note` rather than replacing it: that one is what the operator
+     * typed into the cart before the trip existed, a property of the
+     * confirmation, and these are what people had to say about the run
+     * afterwards. Stored on the trip rather than in a collection of their own
+     * because they are read exactly once — with the trip — and never queried
+     * across trips, which is the test for a sub-document here.
+     */
+    notes: {
+      type: [tripNoteSchema],
+      default: [],
+      validate: {
+        validator: (value: unknown[]) => value.length <= MAX_TRIP_NOTES,
+        message: `A trip may carry at most ${MAX_TRIP_NOTES} notes.`,
+      },
+    },
 
     /**
      * What the trip cost: the vendor's rent for the lorry and the labour bill
