@@ -41,6 +41,7 @@ import {
 import { seedProductRates } from './modules/product-rate/product-rate.seed'
 import { backfillTripDoLedger } from './modules/trip-do/trip-do.sync'
 import { normalizeLegacyUserRecords } from './modules/user/user.migration'
+import { syncVendorIndexes } from './modules/vendor/vendor.migration'
 
 let server: Server | undefined
 
@@ -141,6 +142,16 @@ function start(): void {
     void syncNotificationIndexes()
       .then(() => purgeOrphanedNotifications())
       .then(() => startComplianceSweep())
+    /**
+     * The vendor module's one database-level invariant: a vehicle may have at
+     * most one Active assignment. It is a partial unique index, and on any
+     * database built before this it is sitting there as an ordinary one —
+     * Mongoose names both after the key pattern, so whichever was created first
+     * took the name and the second was refused with a warning. This reads what
+     * the collection actually has and rebuilds it. Independent of every chain
+     * below: it neither reads nor writes a document.
+     */
+    void syncVendorIndexes()
     /**
      * The `deliveries` collection was used once by an earlier delivery design
      * whose documents this module cannot read — and one of them made the trips

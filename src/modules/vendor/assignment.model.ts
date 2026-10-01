@@ -29,7 +29,24 @@ const assignmentSchema = new Schema(
      * through two collections on every page.
      */
     vendorId: { type: Schema.Types.ObjectId, ref: 'Vendor', required: true, index: true },
-    vehicleId: { type: Schema.Types.ObjectId, ref: 'Vehicle', required: true, index: true },
+    /**
+     * Deliberately **not** `index: true`, unlike the two fields either side.
+     *
+     * Mongoose names an index after its key pattern, so a plain index here and
+     * the partial unique one declared below are both `vehicleId_1` — one name,
+     * two different sets of options. MongoDB creates whichever it is asked for
+     * first and refuses the second, and Mongoose reports it as a warning rather
+     * than an error: "options on the duplicate definition (such as ... unique)
+     * will not be applied". The option silently dropped is `unique`, which is
+     * the whole point of the index below — so declaring this one cost the
+     * module its one database-level invariant and said so only in a log line
+     * nobody reads twice.
+     *
+     * Nothing is lost by removing it. `{ vehicleId: 1, assignedFrom: -1 }`
+     * below answers a lookup by vehicle through its prefix, which is every
+     * query that would have used this.
+     */
+    vehicleId: { type: Schema.Types.ObjectId, ref: 'Vehicle', required: true },
     driverId: { type: Schema.Types.ObjectId, ref: 'Driver', required: true, index: true },
 
     /**
@@ -74,11 +91,22 @@ const assignmentSchema = new Schema(
  * `partialFilterExpression` takes an equality here, which is the form MongoDB
  * has always supported — deliberately not `{ $in: [...] }`, which would tie
  * the index to a server version for no gain.
+ *
+ * The name and the spec are exported rather than left to Mongoose to derive,
+ * because `syncVendorIndexes` has to recognise this exact index among whatever
+ * the collection already holds and rebuild it when it finds the wrong one. Two
+ * hand-written copies of a partial filter is precisely how a migration comes to
+ * drop an index it then rebuilds identically on every boot.
  */
-assignmentSchema.index(
-  { vehicleId: 1 },
-  { unique: true, partialFilterExpression: { status: 'Active' } },
-)
+export const ACTIVE_ASSIGNMENT_INDEX = 'vehicleId_1'
+export const ACTIVE_ASSIGNMENT_INDEX_KEY = { vehicleId: 1 } as const
+export const ACTIVE_ASSIGNMENT_INDEX_FILTER = { status: 'Active' } as const
+
+assignmentSchema.index(ACTIVE_ASSIGNMENT_INDEX_KEY, {
+  name: ACTIVE_ASSIGNMENT_INDEX,
+  unique: true,
+  partialFilterExpression: ACTIVE_ASSIGNMENT_INDEX_FILTER,
+})
 
 /**
  * The assignments tab, and the history panel on a vehicle: newest first inside
