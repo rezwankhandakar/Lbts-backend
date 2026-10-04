@@ -211,7 +211,7 @@ const tripFields = {
 /**
  * Confirming a trip.
  *
- * Absent on purpose: `tripNumber`, `vendorTripSerial`, `vendorId`, `status`
+ * Absent on purpose: `tripNumber`, `tripSerial`, `vendorId`, `status`
  * and every copied snapshot. The number is allocated by the server once every
  * check passes; the vendor is read off the vehicle, never from a body — the
  * same rule the Vendor module keeps — and the snapshots are what the database

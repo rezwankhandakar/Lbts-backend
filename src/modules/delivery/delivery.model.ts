@@ -333,10 +333,10 @@ const tripNoteSchema = new Schema(
 
 const deliverySchema = new Schema(
   {
-    /** `V-0007-TRIP-0012`. See `formatTripNumber`. */
+    /** `TRIP-0012`. See `formatTripNumber`. */
     tripNumber: { type: String, required: true, unique: true, index: true },
-    /** The 12 in the number above: this vendor's own running count. */
-    vendorTripSerial: { type: Number, required: true, min: 1 },
+    /** The 12 in the number above: the operation's own running count. */
+    tripSerial: { type: Number, required: true, min: 1 },
 
     vendorId: { type: Schema.Types.ObjectId, ref: 'Vendor', required: true, index: true },
     vehicleId: { type: Schema.Types.ObjectId, ref: 'Vehicle', required: true, index: true },
@@ -488,8 +488,8 @@ deliverySchema.pre('save', async function syncTotals() {
       : null
 })
 
-/** Two trips cannot share a vendor serial — the counter's second line of defence. */
-deliverySchema.index({ vendorId: 1, vendorTripSerial: 1 }, { unique: true })
+/** Two trips cannot share a serial — the counter's second line of defence. */
+deliverySchema.index({ tripSerial: 1 }, { unique: true })
 /** A replayed confirmation is found here rather than numbered again. */
 deliverySchema.index({ createdBy: 1, submissionKey: 1 }, { unique: true })
 /**

@@ -376,23 +376,28 @@ export function canManageAnyTrip(role: UserRole): boolean {
 // --- Numbering -------------------------------------------------------------
 
 /**
- * A trip's number is its vendor's own running serial: `V-0007-TRIP-0012` is
- * the twelfth trip Malek Transport ever ran for us.
+ * A trip's number is one running serial for the whole operation: `TRIP-0012`
+ * is the twelfth trip LBTS ever ran, whoever ran it.
  *
- * Per vendor rather than global, because that is how the business counts trips
- * — a vendor's bill is "trips 1 to 40 this month", and a global serial would
- * turn that into forty numbers with gaps nobody could explain. The vendor code
- * in front is what keeps it globally unique without a second identifier, and it
- * can never go stale because a trip's vendor never changes (see
- * `updateTrip`). Allocated from the shared atomic counter only once every check
- * has passed, so a refused confirmation burns nothing.
+ * Global rather than per vendor, because that is how the office counts trips —
+ * one sequence somebody reads off a manifest and says out loud, with no vendor
+ * code to carry and no two lorries ever both holding a twelfth trip. It is also
+ * what makes the number *the* identifier: a manifest barcode, a search box and
+ * a person all mean the same trip by it, and a vendor's bill is still that
+ * vendor's trips over a month rather than a contiguous range of serials.
+ *
+ * It replaced `V-0007-TRIP-0012`, and the vendor prefix went with it: that
+ * prefix existed only to make a per-vendor count globally unique, which a
+ * global serial is on its own. Nothing in the number describes anything but
+ * the sequence now, so there is nothing in it that can go stale.
+ *
+ * Allocated from the shared atomic counter only once every check has passed, so
+ * a refused confirmation burns nothing.
  */
-export function tripCounterKey(vendorId: string): string {
-  return `delivery-trip:${vendorId}`
-}
+export const TRIP_COUNTER_KEY = 'delivery-trip'
 
-export function formatTripNumber(vendorCode: string, serial: number): string {
-  return `${vendorCode}-TRIP-${String(serial).padStart(4, '0')}`
+export function formatTripNumber(serial: number): string {
+  return `TRIP-${String(serial).padStart(4, '0')}`
 }
 
 // --- Searching a plate -----------------------------------------------------

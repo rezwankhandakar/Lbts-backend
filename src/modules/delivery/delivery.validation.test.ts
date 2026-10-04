@@ -53,7 +53,7 @@ describe('createTripSchema', () => {
 
   it('strips a vendor, a number and a status rather than trusting them', () => {
     const parsed = createTripSchema.parse(
-      trip({ vendorId: DRIVER, tripNumber: 'V-0001-TRIP-9999', status: 'Delivered' }),
+      trip({ vendorId: DRIVER, tripNumber: 'TRIP-9999', status: 'Delivered' }),
     ) as Record<string, unknown>
 
     assert.equal('vendorId' in parsed, false)

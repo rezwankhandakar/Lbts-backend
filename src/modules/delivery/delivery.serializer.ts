@@ -252,7 +252,7 @@ export interface TripRecord {
 
   id: string
   tripNumber: string
-  vendorTripSerial: number
+  tripSerial: number
   status: TripStatus
   tripDate: string
 
@@ -514,7 +514,7 @@ export function toTripRecord(
   return {
     id: String(trip._id),
     tripNumber: trip.tripNumber,
-    vendorTripSerial: trip.vendorTripSerial,
+    tripSerial: trip.tripSerial,
     status: trip.status as TripStatus,
     tripDate: toDay(trip.tripDate) ?? '',
 

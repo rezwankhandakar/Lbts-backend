@@ -26,6 +26,7 @@ import {
   backfillChallanDispatch,
   migrateTripStatuses,
   purgeLegacyDeliveries,
+  renumberTripsGlobally,
   syncDeliveryIndexes,
 } from './modules/delivery/delivery.migration'
 import { seedLocationMaster } from './modules/location/location.seed'
@@ -160,6 +161,14 @@ function start(): void {
      * delivery after the first; `syncDeliveryIndexes` is what clears those.
      */
     const dispatchReady = purgeLegacyDeliveries()
+      /**
+       * Then the trips numbered from their vendor's own serial, onto the one
+       * global serial that replaced it. Before the index sync on purpose: the
+       * unique index is on `tripSerial` now, and a legacy trip has none, so
+       * building it first would be asking it to span a collection where every
+       * value is missing.
+       */
+      .then(() => renumberTripsGlobally())
       .then(() => syncDeliveryIndexes())
       /**
        * Then the trips written while a status was something an operator

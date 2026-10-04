@@ -306,7 +306,7 @@ export async function getVendorBillDetail(vendorId: string, period: Period): Pro
       'tripNumber tripDate status vehicle.registrationNo driver.name challanCount totalQty tripRent labourBill ' +
         'challans.challanNumber challans.slNumber challans.district challans.thana challans.location',
     )
-    .sort({ tripDate: 1, vendorTripSerial: 1 })
+    .sort({ tripDate: 1, tripSerial: 1 })
 
   const [advanceEntries, paymentEntries, history] = await Promise.all([
     EntryModel.find({ kind: 'TripAdvance', tripId: { $in: trips.map((trip) => trip._id) } }).sort({ date: 1, createdAt: 1 }),

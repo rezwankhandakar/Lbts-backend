@@ -18,7 +18,7 @@ import {
   plateMatch,
   plateSearchKey,
   returnFlowFor,
-  tripCounterKey,
+  TRIP_COUNTER_KEY,
   tripIsEditable,
   tripStatusFor,
   vehicleTripBlocker,
@@ -182,16 +182,17 @@ describe('returnFlowFor', () => {
 })
 
 describe('numbering', () => {
-  it("writes a trip number as the vendor's code and its own serial", () => {
-    assert.equal(formatTripNumber('V-0007', 12), 'V-0007-TRIP-0012')
+  it('writes a trip number as one running serial, with no vendor in it', () => {
+    assert.equal(formatTripNumber(12), 'TRIP-0012')
   })
 
   it('grows a digit rather than wrapping past 9999', () => {
-    assert.equal(formatTripNumber('V-0001', 12345), 'V-0001-TRIP-12345')
+    assert.equal(formatTripNumber(12345), 'TRIP-12345')
   })
 
-  it('counts each vendor separately', () => {
-    assert.notEqual(tripCounterKey('a'), tripCounterKey('b'))
+  it('counts every vendor into the same sequence', () => {
+    // One key, so the twelfth trip is the twelfth trip whoever ran it.
+    assert.equal(TRIP_COUNTER_KEY, 'delivery-trip')
   })
 })
 

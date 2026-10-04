@@ -25,7 +25,7 @@ function trip(
 ): LedgerTrip {
   return {
     id,
-    tripNumber: `V-0001-TRIP-${id}`,
+    tripNumber: `TRIP-${id}`,
     completed,
     lines: lines.map((line) => ({ ...FRIDGE, qty: line.qty })),
     returned: returned.map((line) => ({ ...FRIDGE, qty: line.qty })),
@@ -70,7 +70,7 @@ describe('ledgerSourcesFor', () => {
 
   it('names the trips that carried an order line', () => {
     const [order] = ledgerSourcesFor('c1', [{ ...FRIDGE, qty: 5 }], [trip('1', [{ qty: 3 }]), trip('2', [{ qty: 2 }])])
-    assert.deepEqual(order.tripNumbers, ['V-0001-TRIP-1', 'V-0001-TRIP-2'])
+    assert.deepEqual(order.tripNumbers, ['TRIP-1', 'TRIP-2'])
   })
 
   it('adds a return row for pieces that came back, and a re-sent row when a later trip takes them', () => {

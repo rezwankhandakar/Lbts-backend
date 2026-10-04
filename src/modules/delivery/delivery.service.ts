@@ -34,7 +34,7 @@ import {
   driverTripBlocker,
   formatTripNumber,
   plateSearchKey,
-  tripCounterKey,
+  TRIP_COUNTER_KEY,
   tripIsEditable,
   vehicleTripBlocker,
 } from './delivery.constants'
@@ -905,20 +905,19 @@ export async function createTrip(
   /**
    * Past the last refusal, so only now is a number spent — and at most twice.
    *
-   * A second attempt is for one situation: the vendor's counter sitting behind
-   * a number the collection already holds, which is what a restored dump or a
-   * cleared counter leaves. Allocating again steps over it. A burnt number
-   * costs nothing; a vendor whose every confirmation failed forever would cost
-   * a great deal.
+   * A second attempt is for one situation: the counter sitting behind a number
+   * the collection already holds, which is what a restored dump or a cleared
+   * counter leaves. Allocating again steps over it. A burnt number costs
+   * nothing; a confirmation that failed forever would cost a great deal.
    */
   let trip: DeliveryDocument | null = null
 
   for (let attempt = 0; attempt < 2 && trip === null; attempt += 1) {
-    const serial = await nextSequence(tripCounterKey(String(parties.vendor._id)))
+    const serial = await nextSequence(TRIP_COUNTER_KEY)
     const candidate = new DeliveryModel({
       ...body,
-      tripNumber: formatTripNumber(parties.vendor.vendorCode, serial),
-      vendorTripSerial: serial,
+      tripNumber: formatTripNumber(serial),
+      tripSerial: serial,
     })
 
     try {
@@ -939,7 +938,7 @@ export async function createTrip(
         }
       }
 
-      const numbering = clashed.includes('tripNumber') || clashed.includes('vendorTripSerial')
+      const numbering = clashed.includes('tripNumber') || clashed.includes('tripSerial')
       if (!numbering || attempt === 1) {
         throw error
       }
@@ -947,10 +946,7 @@ export async function createTrip(
   }
 
   if (trip === null) {
-    throw new AppError(
-      500,
-      `Could not allocate a trip number for ${parties.vendor.name}. Try again in a moment.`,
-    )
+    throw new AppError(500, 'Could not allocate a trip number. Try again in a moment.')
   }
 
   // The paper is brought in line with what went, now that the trip exists,
