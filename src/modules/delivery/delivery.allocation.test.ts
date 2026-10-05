@@ -6,11 +6,13 @@ import {
   countChanges,
   drawsOn,
   findOverages,
+  followChallanCorrection,
   progressOf,
   rebuildChallanItems,
+  renamedLines,
   sameItems,
 } from './delivery.allocation'
-import type { ReservedLine, SourceLine, TripLine } from './delivery.allocation'
+import type { CarriedChallan, ReservedLine, SourceLine, TripLine } from './delivery.allocation'
 
 /**
  * The arithmetic that keeps a split honest and a correction permanent.
@@ -397,5 +399,136 @@ describe('returns', () => {
       [overages[0].ordered, overages[0].onOtherTrips, overages[0].onThisTrip],
       [4, 3, 4],
     )
+  })
+})
+
+/**
+ * A challan corrected after it left the gate. The trips are copies of the
+ * paper, so they follow it — and the refusals are the cases where which trip
+ * gives something up is a person's decision.
+ */
+describe('followChallanCorrection', () => {
+  const fan: SourceLine = { productName: 'Fan', model: 'SUPER SAVER MARIGOLD', qty: 1 }
+  const cooler: SourceLine = { productName: 'Air Cooler', model: 'WDC-ALL ROUNDER', qty: 2 }
+  const before = [fan, cooler]
+
+  function carrying(
+    tripKey: string,
+    lines: SourceLine[],
+    extra: Partial<Pick<CarriedChallan, 'reserved' | 'returned'>> = {},
+  ): CarriedChallan {
+    return {
+      tripKey,
+      lines: lines.map((line, index) => ({ ...line, sourceIndex: index, source: line })),
+      reserved: [],
+      returned: [],
+      ...extra,
+    }
+  }
+
+  function follow(after: SourceLine[], trips: CarriedChallan[]) {
+    const result = followChallanCorrection(before, after, trips)
+    assert.ok(result.ok, 'expected the trips to follow')
+    return result.trips
+  }
+
+  const renamedFan = { ...fan, productName: 'Ceiling Fan' }
+
+  it('renames a product on the trip, and the source beside it', () => {
+    const [trip] = follow([renamedFan, cooler], [carrying('a', [fan, cooler])])
+
+    assert.equal(trip.changed, true)
+    assert.equal(trip.lines[0].productName, 'Ceiling Fan')
+    // Not a substitution: the paper was typed wrong, the lorry carried the same thing.
+    assert.equal(trip.lines[0].source?.productName, 'Ceiling Fan')
+    assert.deepEqual(trip.lines[1].productName, 'Air Cooler')
+  })
+
+  it('renames what a trip holds back and what came back', () => {
+    const [trip] = follow(
+      [renamedFan, cooler],
+      [carrying('a', [fan], { reserved: [fan], returned: [fan] })],
+    )
+
+    assert.equal(trip.reserved[0].productName, 'Ceiling Fan')
+    assert.equal(trip.returned[0].productName, 'Ceiling Fan')
+  })
+
+  it('leaves a trip alone when nothing it carries changed', () => {
+    const [trip] = follow([fan, { ...cooler, qty: 5 }], [carrying('a', [fan, cooler])])
+
+    assert.equal(trip.changed, false)
+  })
+
+  it('cuts the one trip that carried a line the challan now says less of', () => {
+    const [trip] = follow([fan, { ...cooler, qty: 1 }], [carrying('a', [fan, cooler])])
+
+    assert.equal(trip.lines[1].qty, 1)
+    // The manifest still says what the paper said when the lorry took it.
+    assert.equal(trip.lines[1].source?.qty, 2)
+  })
+
+  it('does not cut a trip whose extra pieces already came back', () => {
+    const [trip] = follow(
+      [fan, { ...cooler, qty: 1 }],
+      [carrying('a', [fan, cooler], { returned: [{ ...cooler, qty: 1 }] })],
+    )
+
+    assert.equal(trip.changed, false)
+    assert.equal(trip.lines[1].qty, 2)
+  })
+
+  it('refuses a cut two lorries would have to share', () => {
+    const result = followChallanCorrection(
+      before,
+      [fan, { ...cooler, qty: 1 }],
+      [carrying('a', [{ ...cooler, qty: 1 }]), carrying('b', [{ ...cooler, qty: 1 }])],
+    )
+
+    assert.equal(result.ok, false)
+    assert.deepEqual(!result.ok && result.refusal.kind, 'several-trips')
+  })
+
+  it('takes a removed product off every trip carrying it', () => {
+    const [trip] = follow([cooler], [carrying('a', [fan, cooler], { returned: [fan] })])
+
+    assert.deepEqual(
+      trip.lines.map((line) => line.productName),
+      ['Air Cooler'],
+    )
+    assert.deepEqual(trip.returned, [])
+  })
+
+  it('refuses to leave a trip carrying nothing of the challan', () => {
+    const result = followChallanCorrection(before, [cooler], [carrying('a', [fan])])
+
+    assert.deepEqual(!result.ok && result.refusal, { kind: 'emptied', tripKey: 'a' })
+  })
+
+  it('reads one line gone and one new as a rename wherever they sit', () => {
+    const { renames, unpaired } = renamedLines(before, [cooler, renamedFan])
+
+    assert.equal(unpaired, false)
+    assert.equal(renames.size, 1)
+  })
+
+  it('will not guess which of several replaced products a trip line became', () => {
+    const result = followChallanCorrection(
+      [fan, cooler, { productName: 'Iron', model: 'WIR-D01', qty: 1 }],
+      [
+        { productName: 'Kettle', model: 'WK-1', qty: 1 },
+        { productName: 'Blender', model: 'WB-2', qty: 1 },
+      ],
+      [carrying('a', [{ productName: 'Iron', model: 'WIR-D01', qty: 1 }])],
+    )
+
+    assert.deepEqual(!result.ok && result.refusal.kind, 'ambiguous')
+  })
+
+  it('leaves a line the challan never listed alone', () => {
+    const stray = { productName: 'Stand', model: 'ST-1', qty: 1 }
+    const [trip] = follow([renamedFan, cooler], [carrying('a', [fan, stray])])
+
+    assert.equal(trip.lines[1].productName, 'Stand')
   })
 })

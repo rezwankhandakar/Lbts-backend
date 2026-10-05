@@ -394,3 +394,234 @@ export function countChanges(lines: TripLine[]): number {
 export function totalQty(lines: { qty: number }[]): number {
   return lines.reduce((sum, line) => sum + line.qty, 0)
 }
+
+// --- A challan corrected after it left the gate -----------------------------
+
+/** One line a trip stores for a challan, reduced to what a correction touches. */
+export interface CarriedLine {
+  sourceIndex: number | null
+  source: SourceLine | null
+  productName: string
+  model: string
+  qty: number
+}
+
+/** A trip's half of one challan: what it carried, held back and brought home. */
+export interface CarriedChallan<R extends SourceLine = SourceLine> {
+  /** Which trip. Any stable string; ids are what callers pass. */
+  tripKey: string
+  lines: CarriedLine[]
+  reserved: SourceLine[]
+  returned: R[]
+}
+
+export interface FollowedChallan<R extends SourceLine = SourceLine> extends CarriedChallan<R> {
+  /** Whether the correction changed anything this trip stores. */
+  changed: boolean
+}
+
+/**
+ * Why a correction cannot be carried onto the trips — each one a case where
+ * *which trip gives something up* is a decision rather than arithmetic.
+ */
+export type FollowRefusal =
+  /** Several products were replaced at once, and a trip carries one of them. */
+  | { kind: 'ambiguous'; line: SourceLine }
+  /** A quantity cut below what went out, on more than one lorry. */
+  | { kind: 'several-trips'; line: SourceLine; gone: number; kept: number; tripKeys: string[] }
+  /** A trip would be left carrying nothing of the challan at all. */
+  | { kind: 'emptied'; tripKey: string }
+
+export type FollowResult<R extends SourceLine = SourceLine> =
+  | { ok: true; trips: FollowedChallan<R>[] }
+  | { ok: false; refusal: FollowRefusal }
+
+/**
+ * Which lines a correction **renamed**, old `lineKey` to the new line.
+ *
+ * A row on the edit form has no identity, so a rename has to be read off the
+ * two lists: with the same number of rows, a product the challan no longer
+ * has, sitting in the same position as one it did not have before, is the same
+ * row with its name or model corrected. Failing that, exactly one line gone and exactly one new is still
+ * one rename and nothing else it could be. Past that it is not guessed at —
+ * `unpaired` says lines were both removed and added with no way to tell which
+ * became which.
+ */
+export function renamedLines(
+  before: SourceLine[],
+  after: SourceLine[],
+): { renames: Map<string, SourceLine>; unpaired: boolean } {
+  const beforeKeys = new Set(before.map(lineKey))
+  const afterKeys = new Set(after.map(lineKey))
+  const renames = new Map<string, SourceLine>()
+  const taken = new Set<string>()
+
+  const gone = (line: SourceLine | undefined): line is SourceLine =>
+    line !== undefined && !afterKeys.has(lineKey(line)) && !renames.has(lineKey(line))
+  const fresh = (line: SourceLine | undefined): line is SourceLine =>
+    line !== undefined && !beforeKeys.has(lineKey(line)) && !taken.has(lineKey(line))
+
+  // Positions only mean anything while no row was added or taken away: delete
+  // the first of three and every row below it has moved up one.
+  if (before.length === after.length) {
+    before.forEach((line, index) => {
+      const candidate = after[index]
+      if (gone(line) && fresh(candidate)) {
+        renames.set(lineKey(line), candidate)
+        taken.add(lineKey(candidate))
+      }
+    })
+  }
+
+  const removed = before.filter(gone)
+  const added = after.filter(fresh)
+
+  if (removed.length === 1 && added.length === 1) {
+    renames.set(lineKey(removed[0]), added[0])
+    return { renames, unpaired: false }
+  }
+
+  return { renames, unpaired: removed.length > 0 && added.length > 0 }
+}
+
+/**
+ * What every trip carrying a challan should store once the challan has been
+ * corrected — the correction made *from the challan's side*, after the lorry
+ * left.
+ *
+ * The challan is the paper and the trip is a copy of it, so a correction to the
+ * paper is carried onto the copies rather than refused because they exist:
+ *
+ * - **A renamed product or model** is renamed on every trip — the line, what it
+ *   holds back, what came back, and the `source` beside it. The trip did not
+ *   substitute anything; the paper was typed wrong, so the manifest must not
+ *   start reading as though a different machine went.
+ * - **A product taken off the challan** is taken off every trip carrying it.
+ * - **A quantity cut below what went out** is cut on the trip that carried it.
+ *   Its `source` is left alone, so the manifest still says "1 of 2".
+ *
+ * And three refusals, where the answer is somebody's to give: a quantity cut
+ * that more than one lorry would have to share, a replacement of several
+ * products at once over lines a trip carries, and a trip left with nothing of
+ * the challan on it — which is a challan to take off that trip, not a line.
+ *
+ * Only what this correction touched is rewritten. A trip line the challan
+ * never listed, before or after, is none of its business.
+ */
+export function followChallanCorrection<R extends SourceLine>(
+  before: SourceLine[],
+  after: SourceLine[],
+  trips: CarriedChallan<R>[],
+): FollowResult<R> {
+  const { renames, unpaired } = renamedLines(before, after)
+
+  const wanted = new Map<string, number>()
+  for (const line of after) {
+    wanted.set(lineKey(line), (wanted.get(lineKey(line)) ?? 0) + line.qty)
+  }
+
+  const removed = new Set(
+    before.map(lineKey).filter((key) => !wanted.has(key) && !renames.has(key)),
+  )
+
+  const renamed = <T extends { productName: string; model: string }>(line: T): T => {
+    const to = renames.get(lineKey(line))
+    return to ? { ...line, productName: to.productName, model: to.model } : line
+  }
+
+  const next: FollowedChallan<R>[] = []
+
+  for (const trip of trips) {
+    const carriesRemoved = trip.lines.find((line) => removed.has(lineKey(line)))
+    if (carriesRemoved && unpaired) {
+      return {
+        ok: false,
+        refusal: {
+          kind: 'ambiguous',
+          line: {
+            productName: carriesRemoved.productName,
+            model: carriesRemoved.model,
+            qty: carriesRemoved.qty,
+          },
+        },
+      }
+    }
+
+    const keep = (line: { productName: string; model: string }) => !removed.has(lineKey(line))
+    const lines = trip.lines.filter(keep).map((line) => ({
+      ...renamed(line),
+      source: line.source ? renamed(line.source) : null,
+    }))
+    const reserved = trip.reserved.filter(keep).map(renamed)
+    const returned = trip.returned.filter(keep).map(renamed)
+
+    const changed =
+      lines.length !== trip.lines.length ||
+      reserved.length !== trip.reserved.length ||
+      returned.length !== trip.returned.length ||
+      [...trip.lines, ...trip.reserved, ...trip.returned].some((line) =>
+        renames.has(lineKey(line)),
+      ) ||
+      trip.lines.some((line) => line.source !== null && renames.has(lineKey(line.source)))
+
+    next.push({ tripKey: trip.tripKey, lines, reserved, returned, changed })
+  }
+
+  // What each trip net-delivered of each product, now that the names agree.
+  const netOf = (trip: FollowedChallan<R>, key: string): number => {
+    const carried = trip.lines
+      .filter((line) => lineKey(line) === key)
+      .reduce((sum, line) => sum + line.qty, 0)
+    const back = trip.returned
+      .filter((line) => lineKey(line) === key)
+      .reduce((sum, line) => sum + line.qty, 0)
+    return Math.max(0, carried - back)
+  }
+
+  for (const [key, kept] of wanted) {
+    const carriers = next.filter((trip) => netOf(trip, key) > 0)
+    const gone = carriers.reduce((sum, trip) => sum + netOf(trip, key), 0)
+
+    if (gone <= kept) {
+      continue
+    }
+
+    if (carriers.length > 1) {
+      const sample = carriers[0].lines.find((line) => lineKey(line) === key) as CarriedLine
+      return {
+        ok: false,
+        refusal: {
+          kind: 'several-trips',
+          line: { productName: sample.productName, model: sample.model, qty: sample.qty },
+          gone,
+          kept,
+          tripKeys: carriers.map((trip) => trip.tripKey),
+        },
+      }
+    }
+
+    // One lorry carried it, so that lorry is what carried fewer.
+    const trip = carriers[0]
+    let excess = gone - kept
+
+    for (let index = trip.lines.length - 1; index >= 0 && excess > 0; index -= 1) {
+      const line = trip.lines[index]
+      if (lineKey(line) !== key) {
+        continue
+      }
+      const cut = Math.min(line.qty, excess)
+      excess -= cut
+      trip.lines[index] = { ...line, qty: line.qty - cut }
+    }
+
+    trip.lines = trip.lines.filter((line) => line.qty > 0)
+    trip.changed = true
+  }
+
+  const emptied = next.find((trip) => trip.lines.length === 0)
+  if (emptied) {
+    return { ok: false, refusal: { kind: 'emptied', tripKey: emptied.tripKey } }
+  }
+
+  return { ok: true, trips: next }
+}

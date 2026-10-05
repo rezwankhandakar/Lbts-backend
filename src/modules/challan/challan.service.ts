@@ -48,7 +48,8 @@ import {
 import type { DispatchStatus } from "../delivery/delivery.constants";
 import {
   assertChallanNotDispatched,
-  assertItemsCoverDispatched,
+  applyTripsFollowingChallan,
+  planTripsFollowingChallan,
 } from "../delivery/delivery.dispatch";
 import { REVIEWABLE_LOCATION_SOURCES } from "../location/location.constants";
 import type {
@@ -2067,12 +2068,14 @@ export async function updateChallan(
   const fields = normalizeFields(input);
 
   /**
-   * A correction may not say that less went out than went out. Correcting a
-   * challan weeks later is ordinary; correcting it to four when six are on a
-   * lorry is a record that cannot be true, and the place to record that less
-   * was actually delivered is the trip, where the two move together.
+   * A challan already on a lorry is corrected like any other, and the trips
+   * carrying it follow: a renamed product is renamed on them, a removed one
+   * comes off them, a quantity cut below what went out is cut on the trip
+   * that carried it. Planned here, before anything is uploaded or written, so
+   * the few corrections the trips cannot follow are refused with nothing
+   * done — and read off the challan as it stands, before its lines change.
    */
-  await assertItemsCoverDispatched(
+  const follows = await planTripsFollowingChallan(
     challan,
     fields.items.map((item) => ({
       productName: item.productName,
@@ -2156,7 +2159,8 @@ export async function updateChallan(
   }
 
   await discardChallanDocument(previousKey);
-  await syncTripDoLedger([challan._id]);
+  // The trips' copies, then the dispatch figures and the Trip DO sheet. Never throws.
+  await applyTripsFollowingChallan(follows, challan, actor);
 
   const changes = challanChanges(before, challanSnapshot(challan));
 

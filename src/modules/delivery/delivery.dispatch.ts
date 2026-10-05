@@ -2,11 +2,14 @@ import type { Types } from 'mongoose'
 import { AppError } from '../../utils/app-error'
 import { ChallanModel } from '../challan/challan.model'
 import type { ChallanDocument } from '../challan/challan.model'
-import { lineKey, netQty } from './delivery.allocation'
-import type { SourceLine } from './delivery.allocation'
+import type { UserDocument } from '../user/user.model'
+import { recordActivity } from '../vendor/vendor.activity'
+import { comparisonKey, followChallanCorrection, lineKey, netQty } from './delivery.allocation'
+import type { FollowedChallan, SourceLine } from './delivery.allocation'
 import { dispatchStatusFor, returnFlowFor } from './delivery.constants'
 import type { DeliveryOutcome, DispatchStatus, TripStatus } from './delivery.constants'
 import { DeliveryModel } from './delivery.model'
+import type { DeliveryDocument } from './delivery.model'
 import { toTripLines } from './delivery.serializer'
 import { syncTripDoLedger } from '../trip-do/trip-do.sync'
 
@@ -17,9 +20,9 @@ import { syncTripDoLedger } from '../trip-do/trip-do.sync'
  * Everything here answers the same question from a different distance: how much
  * of this challan has left the gate. The records list needs it as a stored
  * status it can filter on, the challan's own page needs it line by line with
- * the trips named, and the Challan module needs it as a refusal — a challan
- * cannot be deleted out from under a lorry, or corrected down below what has
- * already gone.
+ * the trips named, and the Challan module needs it twice over — as a refusal,
+ * because a challan cannot be deleted out from under a lorry, and as the way a
+ * correction to a challan reaches the trips already carrying it.
  *
  * It lives in the Delivery module because it is a fact about trips. Challan
  * imports it; nothing here imports Challan's service, so the two do not circle.
@@ -445,40 +448,200 @@ export async function assertChallanNotDispatched(challan: ChallanDocument): Prom
   }
 }
 
+type ReturnedCopy = SourceLine & { reason: string }
+
+/** What one trip stores for a challan once the challan's correction has reached it. */
+export interface TripFollow {
+  trip: DeliveryDocument
+  /** Where the challan sits in `trip.challans`. */
+  index: number
+  next: FollowedChallan<ReturnedCopy>
+}
+
 /**
- * A correction cannot cut a challan below what has already gone out.
+ * What a correction to a challan does to the trips already carrying it —
+ * worked out **before** anything is written, so a correction the trips cannot
+ * follow is refused rather than half-applied.
  *
- * The paper may be corrected long after a lorry has left — that is ordinary —
- * but not to say that less went than went. A trip is a record of a physical
- * event and the challan has to be able to account for it; the way to record
- * that less was actually delivered is to correct it **on the trip**, where the
- * two move together.
+ * This replaced a flat refusal. A challan on a lorry could not be corrected to
+ * say less than had gone out, and since a renamed product is "zero of the old
+ * one", a typo in a product name could not be fixed at all once the challan
+ * had left the gate. The paper is what the office corrects, so the correction
+ * is now carried onto every trip's copy instead — see
+ * `followChallanCorrection` for the rule and for the three cases still
+ * refused, each of which names the trip to go and decide it on.
+ *
+ * Call it with the challan as it stands, before its lines are replaced.
  */
-export async function assertItemsCoverDispatched(
+export async function planTripsFollowingChallan(
   challan: ChallanDocument,
   items: SourceLine[],
-): Promise<void> {
-  const dispatch = await readOneChallanDispatch(challan._id)
+): Promise<TripFollow[]> {
+  const trips = await DeliveryModel.find({ 'challans.challanId': challan._id }).sort({
+    tripDate: 1,
+    createdAt: 1,
+  })
 
-  if (dispatch.trips.length === 0) {
-    return
+  if (trips.length === 0) {
+    return []
   }
 
-  const proposed = new Map<string, number>()
-  for (const item of items) {
-    proposed.set(lineKey(item), (proposed.get(lineKey(item)) ?? 0) + item.qty)
-  }
+  const located = trips.flatMap((trip) => {
+    const index = trip.challans.findIndex(
+      (entry) => String(entry.challanId) === String(challan._id),
+    )
+    return index === -1 ? [] : [{ trip, index }]
+  })
 
-  for (const [key, gone] of dispatch.byProduct) {
-    const kept = proposed.get(key) ?? 0
+  const result = followChallanCorrection<ReturnedCopy>(
+    challan.items.map((item) => ({
+      productName: item.productName,
+      model: item.productModel,
+      qty: item.qty,
+    })),
+    items,
+    located.map(({ trip, index }) => {
+      const entry = trip.challans[index]
+      return {
+        tripKey: String(trip._id),
+        lines: entry.lines.map((line) => ({
+          sourceIndex: line.sourceIndex ?? null,
+          source: line.source
+            ? {
+                productName: line.source.productName,
+                model: line.source.productModel,
+                qty: line.source.qty,
+              }
+            : null,
+          productName: line.productName,
+          model: line.productModel,
+          qty: line.qty,
+        })),
+        reserved: (entry.reserved ?? []).map((line) => ({
+          productName: line.productName,
+          model: line.productModel,
+          qty: line.qty,
+        })),
+        returned: (entry.returned ?? []).map((line) => ({
+          productName: line.productName,
+          model: line.productModel,
+          qty: line.qty,
+          reason: line.reason ?? '',
+        })),
+      }
+    }),
+  )
 
-    if (kept < gone.qty) {
+  if (!result.ok) {
+    const numberOf = (tripKey: string) =>
+      located.find(({ trip }) => String(trip._id) === tripKey)?.trip.tripNumber ?? 'a trip'
+    const refusal = result.refusal
+
+    if (refusal.kind === 'several-trips') {
       throw new AppError(
         409,
-        `${gone.qty} × ${gone.productName} ${gone.model} already went out on ${tripList(
-          dispatch.trips,
-        )}, so this challan cannot say ${kept}. Correct it on the trip instead.`,
+        `${refusal.gone} × ${refusal.line.productName} ${refusal.line.model} went out on ${refusal.tripKeys
+          .map(numberOf)
+          .join(', ')}, so this challan cannot say ${refusal.kept} — which of those trips carried fewer is not something the challan can decide. Correct the quantity on the trip.`,
+      )
+    }
+
+    if (refusal.kind === 'emptied') {
+      throw new AppError(
+        409,
+        `${numberOf(refusal.tripKey)} would be left carrying nothing of ${challan.challanNumber}. Take the challan off that trip first.`,
+      )
+    }
+
+    throw new AppError(
+      409,
+      `${refusal.line.productName} ${refusal.line.model} is on a trip, and several products were replaced at once — so which one it became cannot be told. Change one product at a time, saving in between.`,
+    )
+  }
+
+  return result.trips.flatMap((next) => {
+    const found = located.find(({ trip }) => String(trip._id) === next.tripKey)
+    return found && next.changed ? [{ ...found, next }] : []
+  })
+}
+
+/**
+ * Writes a challan's correction onto the trips carrying it, **after** the
+ * challan is saved, and refreshes what the challan says about its dispatch.
+ *
+ * The same order, and the same posture, `applyCorrections` takes in the other
+ * direction: the record somebody actually corrected is written first, and a
+ * trip that then fails to follow is logged rather than thrown — the challan is
+ * right, and saving it again carries the correction across.
+ *
+ * Each trip is saved through the model, so the pre-save hook recomputes its
+ * quantities and its completion exactly as any other change to its lines does.
+ */
+export async function applyTripsFollowingChallan(
+  follows: TripFollow[],
+  challan: ChallanDocument,
+  actor: UserDocument,
+): Promise<void> {
+  for (const { trip, index, next } of follows) {
+    try {
+      trip.set(
+        `challans.${index}.lines`,
+        next.lines.map((line) => ({
+          sourceIndex: line.sourceIndex,
+          source: line.source
+            ? {
+                productName: line.source.productName,
+                productModel: line.source.model,
+                qty: line.source.qty,
+              }
+            : null,
+          productName: line.productName,
+          productModel: line.model,
+          productModelKey: comparisonKey(line.model),
+          qty: line.qty,
+        })),
+      )
+      trip.set(
+        `challans.${index}.reserved`,
+        next.reserved.map((line) => ({
+          productName: line.productName,
+          productModel: line.model,
+          productModelKey: comparisonKey(line.model),
+          qty: line.qty,
+        })),
+      )
+      trip.set(
+        `challans.${index}.returned`,
+        next.returned.map((line) => ({
+          productName: line.productName,
+          productModel: line.model,
+          productModelKey: comparisonKey(line.model),
+          qty: line.qty,
+          reason: line.reason,
+        })),
+      )
+      trip.updatedBy = actor._id
+
+      await trip.save()
+
+      await recordActivity({
+        vendorId: trip.vendorId,
+        action: 'trip.updated',
+        entityType: 'Trip',
+        entityId: trip._id,
+        entityLabel: trip.tripNumber,
+        summary: `Trip ${trip.tripNumber} now reads ${challan.challanNumber} as corrected on the challan`,
+        actor,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.warn(
+        `[delivery] ${trip.tripNumber} did not follow the correction to ${challan.challanNumber}: ${message}`,
       )
     }
   }
+
+  // The ordered quantity may have moved even where no trip did. Never throws,
+  // and it syncs the Trip DO sheet on its way out.
+  await refreshChallanDispatch([challan._id])
 }
