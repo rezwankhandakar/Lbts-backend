@@ -86,6 +86,12 @@ export interface GatePassStats {
   rejected: number
   /** Gate passes whose trip date is today, whatever their status. */
   today: number
+  /**
+   * Pieces on the gate passes **entered** today — `createdAt`, not the trip
+   * date printed on the paper. Yesterday's challan typed in this morning is
+   * this morning's work, which is the question the dashboard asks.
+   */
+  todayQty: number
 }
 
 /** User input reaches a regex, so metacharacters must lose their meaning. */
@@ -504,7 +510,7 @@ export async function getGatePassStats(viewer: UserDocument): Promise<GatePassSt
   const today = startOfUtcDay(new Date())
   const tomorrow = new Date(today.getTime() + 86_400_000)
 
-  const [rows, todayCount] = await Promise.all([
+  const [rows, todayCount, enteredRows] = await Promise.all([
     GatePassModel.aggregate<{ _id: string; count: number }>([
       { $match: base },
       { $group: { _id: '$status', count: { $sum: 1 } } },
@@ -513,6 +519,10 @@ export async function getGatePassStats(viewer: UserDocument): Promise<GatePassSt
       ...base,
       tripDate: { $gte: today, $lt: tomorrow },
     }),
+    GatePassModel.aggregate<{ _id: null; qty: number }>([
+      { $match: { ...base, createdAt: { $gte: today, $lt: tomorrow } } },
+      { $group: { _id: null, qty: { $sum: { $sum: '$items.qty' } } } },
+    ]),
   ])
 
   const counts = new Map(rows.map((row) => [row._id, row.count]))
@@ -525,6 +535,7 @@ export async function getGatePassStats(viewer: UserDocument): Promise<GatePassSt
     verified: read('Verified'),
     rejected: read('Rejected'),
     today: todayCount,
+    todayQty: enteredRows[0]?.qty ?? 0,
   }
 }
 

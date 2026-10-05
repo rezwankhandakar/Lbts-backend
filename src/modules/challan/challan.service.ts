@@ -577,6 +577,8 @@ export async function getChallan(id: string): Promise<ChallanRecord> {
 export interface ChallanStats {
   total: number;
   today: number;
+  /** Pieces on the challans filed today — the same window `today` counts. */
+  todayQty: number;
   totalQty: number;
   totalAmount: number;
   batchesProcessing: number;
@@ -615,11 +617,20 @@ export async function getChallanStats(): Promise<ChallanStats> {
   const today = startOfUtcDay(new Date());
   const tomorrow = new Date(today.getTime() + 86_400_000);
 
-  const [totals, todayCount, batchRows] = await Promise.all([
+  // The day's count and its pieces come out of one grouped pass, so the two
+  // can never describe different sets of challans.
+  const [totals, todayRows, batchRows] = await Promise.all([
     totalsFor({}),
-    ChallanModel.countDocuments({
-      submittedAt: { $gte: today, $lt: tomorrow },
-    }),
+    ChallanModel.aggregate<{ _id: null; count: number; qty: number }>([
+      { $match: { submittedAt: { $gte: today, $lt: tomorrow } } },
+      {
+        $group: {
+          _id: null,
+          count: { $sum: 1 },
+          qty: { $sum: { $sum: "$items.qty" } },
+        },
+      },
+    ]),
     ChallanBatchModel.aggregate<{ _id: string; count: number }>([
       { $group: { _id: "$status", count: { $sum: 1 } } },
     ]),
@@ -629,7 +640,8 @@ export async function getChallanStats(): Promise<ChallanStats> {
 
   return {
     total: totals.total,
-    today: todayCount,
+    today: todayRows[0]?.count ?? 0,
+    todayQty: todayRows[0]?.qty ?? 0,
     totalQty: totals.totalQty,
     totalAmount: totals.totalAmount,
     batchesProcessing: batches.get("Processing") ?? 0,
