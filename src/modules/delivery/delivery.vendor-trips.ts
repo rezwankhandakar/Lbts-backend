@@ -14,12 +14,16 @@ import type { VendorTripsQuery } from './delivery.validation'
  * a reason that still holds: a trip carries every challan on it, and every
  * challan carries a customer's name, address and phone number. So this is not
  * the trip record with some fields hidden — it is a **different, smaller
- * record** built from a projection that never reads the challans' delivery
- * details off the collection at all. What cannot be selected cannot leak.
+ * record** built from a projection that names every field it reads. What
+ * cannot be selected cannot leak.
  *
  * What a vendor does get is what describes *their* work: which trip, which day,
  * which of their lorries and drivers, how many challans and pieces, how far the
- * paperwork has come back, and what the trip was billed.
+ * paperwork has come back, and what the trip was billed — and, on one trip
+ * opened on its own, where each challan went. **The delivery address is the one
+ * delivery detail in it**, at the business's word: it is where the vendor's
+ * lorry was sent, and the driver carried it on paper anyway. The customer's
+ * name and the receiver's number are still never selected.
  *
  * The caller proves scope before this runs — see `getVendorTrips` in the Vendor
  * controller, which is where `vendorScopeOf` lives. This file takes a vendor id
@@ -198,13 +202,15 @@ export interface VendorTripLine {
 }
 
 /**
- * One challan on the trip, as a vendor may see it: which challan, which
- * district and thana, what went and what came back. Never the customer, the
- * delivery address or the receiver's number.
+ * One challan on the trip, as a vendor may see it: which challan, where it went
+ * — the delivery address, thana and district — and what went and what came
+ * back. Never the customer or the receiver's number.
  */
 export interface VendorTripChallan {
   challanNumber: string
   slNumber: number
+  /** The trip's own copy, taken when the challan went on the lorry. */
+  deliveryAddress: string
   district: string
   thana: string
   locationType: string | null
@@ -234,11 +240,13 @@ export interface VendorTripDetail {
 
 /**
  * The same rule as the list: a projection that names every field it reads, so
- * a customer's details are never loaded off the collection at all.
+ * the customer's name and the receiver's number are never loaded off the
+ * collection at all. The delivery address is named here on purpose.
  */
 const DETAIL_PROJECTION =
   'tripNumber tripDate status vehicle.registrationNo driver.name driver.mobile challanCount totalQty ' +
-  'tripRent labourBill challans.challanNumber challans.slNumber challans.district challans.thana ' +
+  'tripRent labourBill challans.challanNumber challans.slNumber challans.deliveryAddress ' +
+  'challans.district challans.thana ' +
   'challans.location challans.lines.productName challans.lines.productModel challans.lines.productModelKey ' +
   'challans.lines.qty challans.returned.productName challans.returned.productModelKey challans.returned.qty ' +
   'challans.receivedCopy.uploadedAt challans.copyMissing'
@@ -271,6 +279,7 @@ export async function getVendorTripDetail(vendorId: string, tripId: string): Pro
     return {
       challanNumber: challan.challanNumber,
       slNumber: challan.slNumber,
+      deliveryAddress: challan.deliveryAddress ?? '',
       // The trip's own copy first, the resolved location under it — the manifest's rule.
       district: challan.district || challan.location?.district || '',
       thana: challan.thana || challan.location?.thana || '',

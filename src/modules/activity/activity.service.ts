@@ -364,10 +364,9 @@ function startOfLocalDay(value: Date): Date {
 /**
  * The trend, with quiet days drawn as zero rather than left out.
  *
- * The same rule `fillMonthSeries` follows on the vendor dashboard: dropping an
- * empty day slides every column along and silently re-labels the rest, so a
- * fortnight with three quiet days would read as a fortnight that was eleven
- * days long.
+ * Dropping an empty day slides every column along and silently re-labels the
+ * rest, so a fortnight with three quiet days would read as a fortnight that was
+ * eleven days long.
  */
 function fillTrend(rows: DayRow[], start: Date): { date: string; count: number }[] {
   const counts = new Map(rows.map((row) => [row._id, row.count]))
