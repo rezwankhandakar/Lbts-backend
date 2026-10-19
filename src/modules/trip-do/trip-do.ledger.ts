@@ -1,5 +1,7 @@
 import { lineKey } from '../delivery/delivery.allocation'
-import type { TripDoRowKind } from './trip-do.constants'
+import { dispatchStatusFor } from '../delivery/delivery.constants'
+import { orderRowStatusFor } from './trip-do.constants'
+import type { RowDeliveryStatus, TripDoRowKind } from './trip-do.constants'
 
 /**
  * What the Trip DO sheet should hold for one challan, and how to bring the
@@ -53,8 +55,13 @@ export interface LedgerSource {
   itemIndex: number | null
   tripId: string | null
   tripNumbers: string[]
-  /** Return and re-send only: whether that trip's delivery is complete. */
-  tripCompleted: boolean
+  /**
+   * Where this row's goods are. An order row reads **its own product's** trips
+   * — never the whole challan's, or one product still to go would call every
+   * other product on the challan `Partial` too, and a gate pass carrying only
+   * a delivered one would say so.
+   */
+  deliveryStatus: RowDeliveryStatus
   productName: string
   model: string
   qty: number
@@ -65,6 +72,11 @@ export interface LedgerSource {
    * return or re-send.
    */
   firstDeliveredQty: number
+  /**
+   * Order only: the same, on **every** trip whether or not its signed copy is
+   * in — what has left the gate at all. The two apart are what is on the road.
+   */
+  firstDispatchedQty: number
 }
 
 function sumByKey(lines: LedgerTripLine[]): Map<string, { line: LedgerTripLine; qty: number }> {
@@ -96,6 +108,10 @@ function sumByKey(lines: LedgerTripLine[]): Map<string, { line: LedgerTripLine; 
  * first, so it re-sends at most what is on the shelf and at most what it
  * carried; what comes back off it goes onto the shelf afterwards. A trip never
  * re-sends what came back off itself.
+ *
+ * An order row's delivery status is `dispatchStatusFor` asked of that product
+ * alone — what of it the trips net-delivered, against what the challan orders
+ * of it, over the trips that carried it. Two lines of one product share it.
  */
 export function ledgerSourcesFor(
   challanId: string,
@@ -105,11 +121,13 @@ export function ledgerSourcesFor(
   const sources: LedgerSource[] = []
   const positionOf = new Map<string, number>()
   const occurrences = new Map<string, number>()
+  const ordered = new Map<string, number>()
 
   items.forEach((item, index) => {
     const key = lineKey(item)
     const occurrence = occurrences.get(key) ?? 0
     occurrences.set(key, occurrence + 1)
+    ordered.set(key, (ordered.get(key) ?? 0) + item.qty)
     if (!positionOf.has(key)) {
       positionOf.set(key, index)
     }
@@ -126,16 +144,19 @@ export function ledgerSourcesFor(
       itemIndex: index,
       tripId: null,
       tripNumbers: [...new Set(tripNumbers)],
-      tripCompleted: false,
+      deliveryStatus: 'Pending',
       productName: item.productName,
       model: item.model,
       qty: item.qty,
       firstDeliveredQty: 0,
+      firstDispatchedQty: 0,
     })
   })
 
   const atDepot = new Map<string, number>()
   const firstOut = new Map<string, number>()
+  const firstSent = new Map<string, number>()
+  const flow = new Map<string, ProductFlow>()
 
   trips.forEach((trip, tripIndex) => {
     const carried = sumByKey(trip.lines)
@@ -150,9 +171,21 @@ export function ledgerSourcesFor(
       const resent = Math.min(load?.qty ?? 0, shelf)
       const back = returned.get(key)
 
+      const firstTime = Math.max(0, (load?.qty ?? 0) - resent)
+      firstSent.set(key, (firstSent.get(key) ?? 0) + firstTime)
       if (trip.completed) {
-        firstOut.set(key, (firstOut.get(key) ?? 0) + Math.max(0, (load?.qty ?? 0) - resent))
+        firstOut.set(key, (firstOut.get(key) ?? 0) + firstTime)
       }
+
+      const product = flow.get(key) ?? { ...NO_FLOW }
+      if (load && load.qty > 0) {
+        product.trips += 1
+        product.dispatched += Math.max(0, load.qty - (back?.qty ?? 0))
+        product.everyTripCompleted &&= trip.completed
+      }
+      product.returned += back?.qty ?? 0
+      product.resent += resent
+      flow.set(key, product)
 
       if (resent > 0 && load) {
         sources.push({
@@ -163,11 +196,12 @@ export function ledgerSourcesFor(
           itemIndex: null,
           tripId: trip.id,
           tripNumbers: [trip.tripNumber],
-          tripCompleted: trip.completed,
+          deliveryStatus: trip.completed ? 'Delivered' : 'Dispatched',
           productName: load.line.productName,
           model: load.line.model,
           qty: resent,
           firstDeliveredQty: 0,
+          firstDispatchedQty: 0,
         })
       }
 
@@ -180,11 +214,12 @@ export function ledgerSourcesFor(
           itemIndex: null,
           tripId: trip.id,
           tripNumbers: [trip.tripNumber],
-          tripCompleted: trip.completed,
+          deliveryStatus: 'Returned',
           productName: back.line.productName,
           model: back.line.model,
           qty: back.qty,
           firstDeliveredQty: 0,
+          firstDispatchedQty: 0,
         })
       }
 
@@ -201,9 +236,44 @@ export function ledgerSourcesFor(
     const left = firstOut.get(key) ?? 0
     source.firstDeliveredQty = Math.min(source.qty, left)
     firstOut.set(key, left - source.firstDeliveredQty)
+    const sent = firstSent.get(key) ?? 0
+    source.firstDispatchedQty = Math.min(source.qty, sent)
+    firstSent.set(key, sent - source.firstDispatchedQty)
+
+    const product = flow.get(key) ?? NO_FLOW
+    source.deliveryStatus = orderRowStatusFor({
+      dispatchStatus: dispatchStatusFor({
+        ordered: ordered.get(key) ?? 0,
+        dispatched: product.dispatched,
+        trips: product.trips,
+        everyTripCompleted: product.everyTripCompleted,
+      }),
+      returnedQty: product.returned,
+      resentQty: product.resent,
+    })
   }
 
   return sources
+}
+
+/** What the trips did with one product of a challan. */
+interface ProductFlow {
+  /** Trips that carried some of it. */
+  trips: number
+  /** What those trips left with the receiver — carried, less what came back. */
+  dispatched: number
+  /** Every trip that carried it has its signed copy in, or is otherwise closed. */
+  everyTripCompleted: boolean
+  returned: number
+  resent: number
+}
+
+const NO_FLOW: ProductFlow = {
+  trips: 0,
+  dispatched: 0,
+  everyTripCompleted: true,
+  returned: 0,
+  resent: 0,
 }
 
 /**

@@ -30,11 +30,12 @@ export type TripDoRowKind = (typeof TRIP_DO_ROW_KINDS)[number]
 /**
  * Where a row's goods are.
  *
- * An order row reads its challan's dispatch status — the Delivery module's
- * vocabulary, unchanged — except that a `Pending` challan whose goods came
- * back reads `Returned`, the same word the Challan list puts on its badge. A
- * return row is `Returned` by definition, and a re-sent row is `Dispatched`
- * until that trip's signed copy is in and `Delivered` after.
+ * An order row reads the Delivery module's dispatch vocabulary, unchanged,
+ * worked out for **its own product** rather than the whole challan (see
+ * `ledgerSourcesFor`) — except that a `Pending` product whose goods came back
+ * reads `Returned`, the same word the Challan list puts on its badge. A return
+ * row is `Returned` by definition, and a re-sent row is `Dispatched` until that
+ * trip's signed copy is in and `Delivered` after.
  */
 export const ROW_DELIVERY_STATUSES = [
   'Pending',
@@ -45,33 +46,88 @@ export const ROW_DELIVERY_STATUSES = [
 ] as const
 export type RowDeliveryStatus = (typeof ROW_DELIVERY_STATUSES)[number]
 
-export function orderRowStatusFor(challan: {
+export function orderRowStatusFor(product: {
   dispatchStatus: string
   returnedQty?: number | null
   resentQty?: number | null
 }): RowDeliveryStatus {
-  const atDepot = (challan.returnedQty ?? 0) - (challan.resentQty ?? 0)
+  const atDepot = (product.returnedQty ?? 0) - (product.resentQty ?? 0)
 
-  if (challan.dispatchStatus === 'Pending' && atDepot > 0) {
+  if (product.dispatchStatus === 'Pending' && atDepot > 0) {
     return 'Returned'
   }
 
-  return (ROW_DELIVERY_STATUSES as readonly string[]).includes(challan.dispatchStatus)
-    ? (challan.dispatchStatus as RowDeliveryStatus)
+  return (ROW_DELIVERY_STATUSES as readonly string[]).includes(product.dispatchStatus)
+    ? (product.dispatchStatus as RowDeliveryStatus)
     : 'Pending'
 }
 
 /**
- * Whether a row's pieces use up a gate pass line's quantity.
+ * Whether linking a row takes pieces off a gate pass line.
  *
- * Only an order row does. A return is pieces the order row already carries
- * coming back, and a re-send is those same pieces going out again — linking
- * either to the Trip DO the order row has says which gate pass they belong to,
- * not that the gate pass let out more. Counting them would refuse the one Trip
- * DO they honestly have, because the order row had already filled it.
+ * An order row and a re-sent row do: both are pieces leaving the depot. A
+ * return does the opposite — it is pieces coming back onto the shelf — so it
+ * never needs room on a line, and linked to one it gives room back
+ * (`lineHeldQty`).
  */
 export function countsTowardGatePassQty(kind: string): boolean {
-  return kind === 'Order'
+  return kind !== 'Return'
+}
+
+/** A row linked to a gate pass line, reduced to what the line's room reads. */
+export interface LineUseRow {
+  /** Whose pieces these are. Rows without one are read as one challan's. */
+  challanId?: string | null
+  kind: string
+  qty: number
+}
+
+function heldByChallan(rows: readonly LineUseRow[]): Map<string, number> {
+  const held = new Map<string, number>()
+  for (const row of rows) {
+    const key = String(row.challanId ?? '')
+    const signed = row.kind === 'Return' ? -row.qty : row.qty
+    held.set(key, (held.get(key) ?? 0) + signed)
+  }
+  return held
+}
+
+/**
+ * Pieces of one gate pass line the challans linked to it are holding.
+ *
+ * **What comes back is free again.** Per challan, its order and re-sent pieces
+ * less what came back off its trips, never below nothing — so a return linked
+ * to the line hands its pieces back, and another challan's row can then take
+ * that Trip DO for them. Per challan rather than across the line, so a return
+ * frees only pieces its own challan took off this line: one linked to a gate
+ * pass its challan never drew on gives nothing back, and cannot make room that
+ * was never there.
+ */
+export function lineHeldQty(rows: readonly LineUseRow[]): number {
+  let total = 0
+  for (const held of heldByChallan(rows).values()) {
+    total += Math.max(0, held)
+  }
+  return total
+}
+
+/**
+ * How many pieces a row of `challanId` may still link to a line, given every
+ * other row already on it.
+ *
+ * The line, less what other challans hold, less what this challan already
+ * holds — which is negative while this challan has returned pieces sitting on
+ * the line, so its own re-send takes those back first.
+ */
+export function lineRoomFor(
+  lineQty: number,
+  others: readonly LineUseRow[],
+  challanId: string | null,
+): number {
+  const key = String(challanId ?? '')
+  const own = heldByChallan(others.filter((row) => String(row.challanId ?? '') === key)).get(key) ?? 0
+  const rest = lineHeldQty(others.filter((row) => String(row.challanId ?? '') !== key))
+  return Math.max(0, lineQty - rest - own)
 }
 
 // --- Gate pass side ----------------------------------------------------------
@@ -88,9 +144,10 @@ export const LINKABLE_GATE_PASS_STATUSES = ['Submitted', 'Verified'] as const
  * One gate pass product line, as the challans linked to it say it went.
  *
  * `Unlinked` when no row points at it. A linked return that nothing linked has
- * carried out again is `Returned` — those pieces are on the depot shelf, not
- * with a customer. A linked re-send whose goods are not all signed for yet is
- * `Resent`. Otherwise the *least advanced* of the linked rows decides, because
+ * carried out again — neither a re-send nor another challan given its room —
+ * is `Returned`: those pieces are on the depot shelf, not with a customer. A
+ * linked re-send — or another challan's row on returned pieces — whose goods
+ * are not all signed for yet is `Resent`. Otherwise the *least advanced* of the linked rows decides, because
  * a gate pass line is only as delivered as its slowest piece: every row
  * delivered is `Delivered`, every row at least out of the gate is
  * `Dispatched`, anything out at all is `Partial`.
@@ -106,37 +163,159 @@ export const GATE_PASS_PRODUCT_STATUSES = [
 ] as const
 export type GatePassProductStatus = (typeof GATE_PASS_PRODUCT_STATUSES)[number]
 
+/**
+ * Pieces of a line's returns another challan has taken out again.
+ *
+ * A line's order pieces beyond what it carries can only be pieces that came
+ * back — no more than came back and were not re-sent by their own challan.
+ * Zero while the line still has untouched pieces to give, because then nothing
+ * says the returned ones were used.
+ */
+export function returnedPiecesReusedQty(rows: readonly LineUseRow[], lineQty: number): number {
+  const returned = rows.reduce((sum, row) => (row.kind === 'Return' ? sum + row.qty : sum), 0)
+  const resent = rows.reduce((sum, row) => (row.kind === 'Resent' ? sum + row.qty : sum), 0)
+  const ordered = rows.reduce((sum, row) => (row.kind === 'Order' ? sum + row.qty : sum), 0)
+  return Math.max(0, Math.min(returned - resent, ordered - lineQty))
+}
+
+/** A row on a gate pass line, with when it was linked there. */
+export interface LineHistoryRow extends LineUseRow {
+  id: string
+  /** When the Trip DO was set — milliseconds, so it sorts. */
+  linkedAt: number
+}
+
+/**
+ * Which order rows on a line went out on pieces another challan sent back —
+ * the rows drawn as **Re-sent**, though each is its own challan's order.
+ *
+ * `returnedPiecesReusedQty` says how many; this says whose. They go on the rows
+ * linked **most recently**, because a row linked while the line still had
+ * untouched pieces did not need the returned ones, and never on a row whose own
+ * challan has a return on the line — those pieces are its own, out and back.
+ * Derived on every read and never stored, so unlinking a row moves the mark to
+ * whichever row now carries the returned pieces.
+ */
+export function rowsCarryingReturns(
+  rows: readonly LineHistoryRow[],
+  lineQty: number,
+): Map<string, number> {
+  const result = new Map<string, number>()
+  let left = returnedPiecesReusedQty(rows, lineQty)
+  if (left === 0) {
+    return result
+  }
+
+  const returning = new Set(
+    rows.filter((row) => row.kind === 'Return').map((row) => String(row.challanId ?? '')),
+  )
+  const candidates = rows
+    .filter((row) => row.kind === 'Order' && !returning.has(String(row.challanId ?? '')))
+    .sort((a, b) => b.linkedAt - a.linkedAt || (b.id < a.id ? -1 : b.id > a.id ? 1 : 0))
+
+  for (const row of candidates) {
+    if (left === 0) {
+      break
+    }
+    const take = Math.min(row.qty, left)
+    result.set(row.id, take)
+    left -= take
+  }
+  return result
+}
+
 /** A row linked to a gate pass line, reduced to what the line's figures read. */
-export interface LinkedRowState {
-  kind: string
+export interface LinkedRowState extends LineUseRow {
   deliveryStatus: string
-  qty: number
   /** The whole challan line's quantity. Order rows only. */
   lineQty?: number | null
   /** See `firstDeliveredQty` on the row. Absent on a row the sync has not rewritten yet. */
   firstDeliveredQty?: number | null
+  /** See `firstDispatchedQty` on the row. Absent on a row the sync has not rewritten yet. */
+  firstDispatchedQty?: number | null
 }
 
 function qtyOfKind(rows: readonly LinkedRowState[], kind: string): number {
   return rows.reduce((sum, row) => (row.kind === kind ? sum + row.qty : sum), 0)
 }
 
-export function gatePassProductStatusFor(rows: readonly LinkedRowState[]): GatePassProductStatus {
+/**
+ * One line's returned pieces still on the shelf, and the rows still moving.
+ *
+ * On the shelf is what came back and nothing re-sent — but no more than the
+ * line has free, because a return another challan has since been linked to is
+ * on that challan's lorry, not on the shelf. A challan whose pieces have all
+ * come back off this line holds none of it, so its rows are not moving on it.
+ */
+function lineReading(
+  rows: readonly LinkedRowState[],
+  lineQty: number,
+): { onShelf: number; reused: number; moving: LinkedRowState[] } {
+  const free = lineQty - lineHeldQty(rows)
+  const onShelf = Math.max(0, Math.min(qtyOfKind(rows, 'Return') - qtyOfKind(rows, 'Resent'), free))
+  const held = heldByChallan(rows)
+  const moving = rows.filter(
+    (row) => row.kind !== 'Return' && (held.get(String(row.challanId ?? '')) ?? 0) > 0,
+  )
+  return { onShelf, reused: returnedPiecesReusedQty(rows, lineQty), moving }
+}
+
+/**
+ * One gate pass line's status. `lineQty` is what the line carries; without it
+ * every returned piece nothing re-sent reads as on the shelf.
+ */
+export function gatePassProductStatusFor(
+  rows: readonly LinkedRowState[],
+  lineQty = Number.POSITIVE_INFINITY,
+): GatePassProductStatus {
   if (rows.length === 0) {
     return 'Unlinked'
   }
+  const { onShelf, reused, moving } = lineReading(rows, lineQty)
+  return statusOfReading(onShelf, reused, moving)
+}
 
-  if (qtyOfKind(rows, 'Return') > qtyOfKind(rows, 'Resent')) {
+/** A whole gate pass's status, read line by line so one line's return never frees another's. */
+export function gatePassStatusOfLines(
+  lines: readonly { qty: number; rows: readonly LinkedRowState[] }[],
+): GatePassProductStatus {
+  if (lines.every((line) => line.rows.length === 0)) {
+    return 'Unlinked'
+  }
+  let onShelf = 0
+  let reused = 0
+  const moving: LinkedRowState[] = []
+  for (const line of lines) {
+    const reading = lineReading(line.rows, line.qty)
+    onShelf += reading.onShelf
+    reused += reading.reused
+    moving.push(...reading.moving)
+  }
+  return statusOfReading(onShelf, reused, moving)
+}
+
+/**
+ * `reused` is returned pieces another challan has taken out again
+ * (`returnedPiecesReusedQty`). They read `Resent` exactly as a re-sent row's
+ * do — the goods left the depot a second time — until every moving row is
+ * signed for.
+ */
+function statusOfReading(
+  onShelf: number,
+  reused: number,
+  movingRows: readonly LinkedRowState[],
+): GatePassProductStatus {
+  if (onShelf > 0) {
     return 'Returned'
   }
 
-  const moving = rows.filter((row) => row.kind !== 'Return').map((row) => row.deliveryStatus)
+  const moving = movingRows.map((row) => row.deliveryStatus)
   if (moving.length === 0) {
     return 'Returned'
   }
   const everyDelivered = moving.every((status) => status === 'Delivered')
 
-  if (qtyOfKind(rows, 'Resent') > 0 && !everyDelivered) {
+  if ((reused > 0 || movingRows.some((row) => row.kind === 'Resent')) && !everyDelivered) {
     return 'Resent'
   }
   if (everyDelivered) {
@@ -162,7 +341,9 @@ export function gatePassProductStatusFor(rows: readonly LinkedRowState[]): GateP
  *   out on this gate pass.
  * - A **return** takes its pieces back off: they came back to the depot, so the
  *   gate pass's Not Delivered figure shows them.
- * - A **re-send** adds its pieces again: they have left the depot a second time.
+ * - A **re-send** adds its pieces again once its own trip's signed copy is in.
+ *   Until then they are on the road — `rowDispatchedShare` counts them, and the
+ *   gate pass reads them as Sent rather than Delivered.
  *
  * A row written before `firstDeliveredQty` existed counts whole when it reads
  * Delivered, which is what the figure meant until then.
@@ -172,19 +353,68 @@ export function rowDeliveredShare(row: LinkedRowState): number {
     return -row.qty
   }
   if (row.kind === 'Resent') {
+    return row.deliveryStatus === 'Delivered' ? row.qty : 0
+  }
+  return orderShare(row, firstDeliveredOf(row))
+}
+
+/**
+ * What one linked row adds to the pieces of its line that have left the gate
+ * and not come back: the order's first trip out, signed for or not, less what
+ * a return brought back, plus what a re-send took out again. Less the delivered
+ * share, it is what is on the road.
+ */
+export function rowDispatchedShare(row: LinkedRowState): number {
+  if (row.kind === 'Return') {
+    return -row.qty
+  }
+  if (row.kind === 'Resent') {
     return row.qty
   }
+  const first =
+    typeof row.firstDispatchedQty === 'number'
+      ? row.firstDispatchedQty
+      : Math.max(
+          firstDeliveredOf(row),
+          row.deliveryStatus === 'Dispatched' ? (row.lineQty ?? 0) : 0,
+        )
+  return orderShare(row, first)
+}
+
+/** What one linked row puts on the depot shelf: a return's pieces, less a re-send's. */
+export function rowReturnedShare(row: LinkedRowState): number {
+  if (row.kind === 'Return') {
+    return row.qty
+  }
+  if (row.kind === 'Resent') {
+    return -row.qty
+  }
+  return 0
+}
+
+function firstDeliveredOf(row: LinkedRowState): number {
+  if (typeof row.firstDeliveredQty === 'number') {
+    return row.firstDeliveredQty
+  }
+  return row.deliveryStatus === 'Delivered' ? (row.lineQty ?? 0) : 0
+}
+
+/** An order row's share of `first` pieces of its whole challan line. */
+function orderShare(row: LinkedRowState, first: number): number {
   const lineQty = row.lineQty ?? 0
   if (lineQty <= 0) {
     return 0
   }
-  const first =
-    typeof row.firstDeliveredQty === 'number'
-      ? row.firstDeliveredQty
-      : row.deliveryStatus === 'Delivered'
-        ? lineQty
-        : 0
   return (row.qty * Math.min(first, lineQty)) / lineQty
+}
+
+/** A share total as whole pieces: never below nothing, never above `ceiling`. */
+function piecesWithin(total: number, ceiling: number): number {
+  return Math.max(0, Math.min(ceiling, Math.round(total)))
+}
+
+function sumOf(rows: readonly LinkedRowState[], share: (row: LinkedRowState) => number): number {
+  return rows.reduce((sum, row) => sum + share(row), 0)
 }
 
 /** Delivered pieces on a gate pass line: never below nothing, never above what it carries. */
@@ -192,8 +422,35 @@ export function gatePassLineDeliveredQty(
   lineQty: number,
   rows: readonly LinkedRowState[],
 ): number {
-  const total = rows.reduce((sum, row) => sum + rowDeliveredShare(row), 0)
-  return Math.max(0, Math.min(lineQty, Math.round(total)))
+  return piecesWithin(sumOf(rows, rowDeliveredShare), lineQty)
+}
+
+/**
+ * Where one gate pass line's pieces are, as the challans linked to it say.
+ *
+ * Three buckets that never overlap. **Delivered** is signed for. **Sent** has
+ * left the gate and its signed copy is not back — out, less delivered.
+ * **Returned** came back off a lorry and has not gone out again, no more than
+ * the line has not out. Whatever is left over has not left the gate at all, or
+ * is on no challan yet; Not Delivered is everything but Delivered.
+ *
+ * `GATE_PASS_PIECES` in `trip-do.links.ts` is the same rule as an aggregation,
+ * for the list-wide cards. Change one, change both.
+ */
+export interface LinePieces {
+  delivered: number
+  sent: number
+  returned: number
+}
+
+export function gatePassLinePieces(lineQty: number, rows: readonly LinkedRowState[]): LinePieces {
+  const out = piecesWithin(sumOf(rows, rowDispatchedShare), lineQty)
+  const delivered = Math.min(out, gatePassLineDeliveredQty(lineQty, rows))
+  return {
+    delivered,
+    sent: out - delivered,
+    returned: piecesWithin(sumOf(rows, rowReturnedShare), lineQty - out),
+  }
 }
 
 // --- Money -------------------------------------------------------------------

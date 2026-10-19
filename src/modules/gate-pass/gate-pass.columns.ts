@@ -150,6 +150,45 @@ export function lineMatchesColumns(
   })
 }
 
+/**
+ * The delivery cards above the sheet, as filters. Each card counts pieces, so
+ * pressing one keeps the lines that hold pieces in its bucket — a line of four
+ * with one back at the depot is under Returned *and* under Delivered — rather
+ * than the lines whose delivery status reads one word, which would show rows
+ * that add up to something other than the card. Mirrored by `PIECE_FILTERS` in
+ * the frontend's `types/index.ts` and `lineHasPieces` in `gate-pass-columns.ts`.
+ */
+export const GATE_PASS_PIECE_FILTERS = ['all', 'delivered', 'notDelivered', 'sent', 'returned'] as const
+export type GatePassPieceFilter = (typeof GATE_PASS_PIECE_FILTERS)[number]
+
+/** One line's pieces by bucket, as `deliveryByGatePassLine` reads them. */
+export interface LinePieceState {
+  /** Uncapped — see `GatePassLineDelivery`. */
+  deliveredQty: number
+  sentQty: number
+  returnedQty: number
+}
+
+export function lineHasPieces(
+  qty: number,
+  pieces: LinePieceState,
+  filter: GatePassPieceFilter,
+): boolean {
+  const delivered = Math.min(qty, pieces.deliveredQty)
+  switch (filter) {
+    case 'delivered':
+      return delivered > 0
+    case 'notDelivered':
+      return delivered < qty
+    case 'sent':
+      return pieces.sentQty > 0
+    case 'returned':
+      return pieces.returnedQty > 0
+    default:
+      return true
+  }
+}
+
 function orBlank(value: string | null | undefined): ColumnValue {
   return value ? value : null
 }

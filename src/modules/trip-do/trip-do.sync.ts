@@ -4,8 +4,6 @@ import { refreshBillingStatus } from '../bill/bill.status'
 import { ChallanModel } from '../challan/challan.model'
 import { DeliveryModel } from '../delivery/delivery.model'
 import { comparisonKey } from '../gate-pass/gate-pass.constants'
-import { orderRowStatusFor } from './trip-do.constants'
-import type { RowDeliveryStatus } from './trip-do.constants'
 import { ledgerSourcesFor, reconcileRows } from './trip-do.ledger'
 import type { LedgerSource, LedgerTrip } from './trip-do.ledger'
 import { TripDoLineModel } from './trip-do.model'
@@ -32,7 +30,7 @@ const CHUNK = 50
 
 const CHALLAN_FIELDS =
   'challanNumber slNumber submittedAt customerName deliveryAddress district thana ' +
-  'resolvedLocation receiverMobile zonePo items dispatchStatus returnedQty resentQty'
+  'resolvedLocation receiverMobile zonePo items'
 
 async function loadChallans(ids: string[]) {
   return ChallanModel.find({ _id: { $in: ids } }).select(CHALLAN_FIELDS)
@@ -92,16 +90,6 @@ function rateCopyOf(item: LoadedChallan['items'][number] | undefined) {
   }
 }
 
-function deliveryStatusOf(challan: LoadedChallan, source: LedgerSource): RowDeliveryStatus {
-  if (source.kind === 'Return') {
-    return 'Returned'
-  }
-  if (source.kind === 'Resent') {
-    return source.tripCompleted ? 'Delivered' : 'Dispatched'
-  }
-  return orderRowStatusFor(challan)
-}
-
 /**
  * Everything a row copies, for one source.
  *
@@ -141,9 +129,10 @@ function copyFor(challan: LoadedChallan, source: LedgerSource) {
     lineQty: source.kind === 'Order' ? source.qty : (item?.qty ?? 0),
     lineAmount: item?.rate?.amount ?? null,
     firstDeliveredQty: source.kind === 'Order' ? source.firstDeliveredQty : null,
+    firstDispatchedQty: source.kind === 'Order' ? source.firstDispatchedQty : null,
 
     tripNumbers: source.tripNumbers,
-    deliveryStatus: deliveryStatusOf(challan, source),
+    deliveryStatus: source.deliveryStatus,
   }
 }
 

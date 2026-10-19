@@ -126,6 +126,12 @@ const tripDoLineSchema = new Schema(
      * sync has written it.
      */
     firstDeliveredQty: { type: Number, default: null },
+    /**
+     * Order rows: the same on every trip, signed for or not — what has left the
+     * gate. Less `firstDeliveredQty`, it is what a gate pass counts as on the
+     * road (`rowDispatchedShare`). Null until the sync has written it.
+     */
+    firstDispatchedQty: { type: Number, default: null },
 
     // --- Copied from the trips ---------------------------------------------
     tripNumbers: { type: [String], default: [] },

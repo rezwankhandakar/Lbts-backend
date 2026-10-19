@@ -1,12 +1,25 @@
 import { Types } from 'mongoose'
 import { AppError } from '../../utils/app-error'
 import { comparisonKey } from '../gate-pass/gate-pass.constants'
+import { GatePassModel } from '../gate-pass/gate-pass.model'
 import type { GatePassDocument } from '../gate-pass/gate-pass.model'
 import { syncLabourBillCopies } from '../labour-bill/labour-bill.lines'
 import type { UserDocument } from '../user/user.model'
-import { gatePassLineDeliveredQty, gatePassProductStatusFor } from './trip-do.constants'
-import type { GatePassProductStatus, LinkedRowState } from './trip-do.constants'
+import {
+  gatePassLineDeliveredQty,
+  gatePassLinePieces,
+  gatePassProductStatusFor,
+  lineHeldQty,
+  rowsCarryingReturns,
+} from './trip-do.constants'
+import type {
+  GatePassProductStatus,
+  LineHistoryRow,
+  LineUseRow,
+  LinkedRowState,
+} from './trip-do.constants'
 import { TripDoLineModel } from './trip-do.model'
+import type { TripDoLineDocument } from './trip-do.model'
 
 /**
  * The half of the Trip DO module the Gate Pass module calls.
@@ -45,68 +58,205 @@ export function rowLineKey(row: {
   return row.link?.modelKey || row.productModelKey
 }
 
-/**
- * Pieces linked to one gate pass, by line — order rows only, because a return
- * or re-send is pieces an order row already counts (`countsTowardGatePassQty`).
- *
- * An aggregation `$match` does no schema casting, so the id is cast here — the
- * mistake the Vendor summary made once, reporting every fleet as empty.
- */
-export async function allocatedByModel(
-  gatePassId: IdLike,
-  excludeRowIds: IdLike[] = [],
-): Promise<Map<string, number>> {
-  const rows = await TripDoLineModel.aggregate<{ _id: string; qty: number }>([
-    {
-      $match: {
-        'link.gatePassId': toObjectId(gatePassId),
-        kind: 'Order',
-        ...(excludeRowIds.length > 0 ? { _id: { $nin: excludeRowIds.map(toObjectId) } } : {}),
-      },
-    },
-    { $group: { _id: LINKED_LINE_KEY, qty: { $sum: '$qty' } } },
-  ])
+/** A row on a gate pass line, as the line's room reads it (`lineHeldQty`). */
+export interface PlacedRow extends LineUseRow {
+  id: string
+  challanId: string
+  /** The gate pass line it is on — `rowLineKey`. */
+  lineKey: string
+}
 
-  return new Map(rows.map((row) => [row._id, row.qty]))
+/** Every row linked to one gate pass, placed on its line. */
+export async function placedRowsOn(gatePassId: IdLike): Promise<PlacedRow[]> {
+  const rows = await TripDoLineModel.find({ 'link.gatePassId': toObjectId(gatePassId) }).select(
+    'challanId kind qty link productModelKey',
+  )
+  return rows.map((row) => ({
+    id: String(row._id),
+    challanId: String(row.challanId),
+    kind: row.kind,
+    qty: row.qty,
+    lineKey: rowLineKey(row),
+  }))
+}
+
+/** `placedRowsOn`, one line's worth. */
+export function rowsOnLine(rows: readonly PlacedRow[], lineKey: string): PlacedRow[] {
+  return rows.filter((row) => row.lineKey === lineKey)
+}
+
+/** A linked row as `rowsCarryingReturns` reads it. */
+export function historyRowOf(
+  row: Pick<TripDoLineDocument, '_id' | 'challanId' | 'kind' | 'qty' | 'link'>,
+): LineHistoryRow {
+  return {
+    id: String(row._id),
+    challanId: String(row.challanId),
+    kind: row.kind,
+    qty: row.qty,
+    linkedAt: row.link?.linkedAt ? row.link.linkedAt.getTime() : 0,
+  }
 }
 
 /**
- * `rowDeliveredShare` as an aggregation expression, for the list-wide figure
- * that cannot load every row. Change one, change both.
+ * For a page of rows, how many of each order row's pieces another challan
+ * sent back (`rowsCarryingReturns`) — the rows the sheet tags **Re-sent**.
+ *
+ * Which row carries them depends on everything on the line, not just what is
+ * on the page, so the lines are read whole. Only a gate pass with a return
+ * linked to it can have any, which is what the first query asks — on most
+ * pages that is the only one.
  */
+export async function returnedPiecesOnRows(
+  rows: readonly TripDoLineDocument[],
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>()
+  const linkedIds = [
+    ...new Set(
+      rows
+        .filter((row) => row.kind === 'Order' && row.link)
+        .map((row) => String(row.link?.gatePassId)),
+    ),
+  ]
+  if (linkedIds.length === 0) {
+    return result
+  }
+
+  const withReturns = await TripDoLineModel.distinct('link.gatePassId', {
+    'link.gatePassId': { $in: linkedIds.map(toObjectId) },
+    kind: 'Return',
+  })
+  if (withReturns.length === 0) {
+    return result
+  }
+
+  const [gatePasses, linked] = await Promise.all([
+    GatePassModel.find({ _id: { $in: withReturns } }).select('items'),
+    TripDoLineModel.find({ 'link.gatePassId': { $in: withReturns } }).select(
+      'challanId kind qty link productModelKey',
+    ),
+  ])
+  const carried = new Map(gatePasses.map((gatePass) => [String(gatePass._id), gatePassQtyByModel(gatePass)]))
+
+  const lines = new Map<string, { gatePassId: string; lineKey: string; rows: LineHistoryRow[] }>()
+  for (const row of linked) {
+    const gatePassId = String(row.link?.gatePassId)
+    const lineKey = rowLineKey(row)
+    const key = `${gatePassId}|${lineKey}`
+    const line = lines.get(key) ?? { gatePassId, lineKey, rows: [] }
+    line.rows.push(historyRowOf(row))
+    lines.set(key, line)
+  }
+
+  for (const line of lines.values()) {
+    const qty = carried.get(line.gatePassId)?.get(line.lineKey) ?? Number.POSITIVE_INFINITY
+    for (const [id, pieces] of rowsCarryingReturns(line.rows, qty)) {
+      result.set(id, pieces)
+    }
+  }
+  return result
+}
+
+/**
+ * The row-share functions in `trip-do.constants.ts` as aggregation
+ * expressions, for the list-wide figures that cannot load every row. Change
+ * one, change both.
+ */
+const FIRST_DELIVERED = {
+  $ifNull: [
+    '$firstDeliveredQty',
+    { $cond: [{ $eq: ['$deliveryStatus', 'Delivered'] }, { $ifNull: ['$lineQty', 0] }, 0] },
+  ],
+}
+
+const FIRST_DISPATCHED = {
+  $ifNull: [
+    '$firstDispatchedQty',
+    {
+      $max: [
+        FIRST_DELIVERED,
+        { $cond: [{ $eq: ['$deliveryStatus', 'Dispatched'] }, { $ifNull: ['$lineQty', 0] }, 0] },
+      ],
+    },
+  ],
+}
+
+/** An order row's share of `first` pieces of its whole challan line. */
+function orderShare(first: unknown) {
+  return {
+    case: { $gt: [{ $ifNull: ['$lineQty', 0] }, 0] },
+    then: {
+      $divide: [{ $multiply: ['$qty', { $min: [first, '$lineQty'] }] }, '$lineQty'],
+    },
+  }
+}
+
+/** `rowDeliveredShare`. */
 export const DELIVERED_SHARE = {
   $switch: {
     branches: [
       { case: { $eq: ['$kind', 'Return'] }, then: { $multiply: ['$qty', -1] } },
-      { case: { $eq: ['$kind', 'Resent'] }, then: '$qty' },
       {
-        case: { $gt: [{ $ifNull: ['$lineQty', 0] }, 0] },
-        then: {
-          $divide: [
-            {
-              $multiply: [
-                '$qty',
-                {
-                  $min: [
-                    {
-                      $ifNull: [
-                        '$firstDeliveredQty',
-                        { $cond: [{ $eq: ['$deliveryStatus', 'Delivered'] }, '$lineQty', 0] },
-                      ],
-                    },
-                    '$lineQty',
-                  ],
-                },
-              ],
-            },
-            '$lineQty',
-          ],
-        },
+        case: { $eq: ['$kind', 'Resent'] },
+        then: { $cond: [{ $eq: ['$deliveryStatus', 'Delivered'] }, '$qty', 0] },
       },
+      orderShare(FIRST_DELIVERED),
     ],
     default: 0,
   },
-} as const
+}
+
+/** `rowDispatchedShare`. */
+export const DISPATCHED_SHARE = {
+  $switch: {
+    branches: [
+      { case: { $eq: ['$kind', 'Return'] }, then: { $multiply: ['$qty', -1] } },
+      { case: { $eq: ['$kind', 'Resent'] }, then: '$qty' },
+      orderShare(FIRST_DISPATCHED),
+    ],
+    default: 0,
+  },
+}
+
+/** `rowReturnedShare`. */
+export const RETURNED_SHARE = {
+  $switch: {
+    branches: [
+      { case: { $eq: ['$kind', 'Return'] }, then: '$qty' },
+      { case: { $eq: ['$kind', 'Resent'] }, then: { $multiply: ['$qty', -1] } },
+    ],
+    default: 0,
+  },
+}
+
+/**
+ * `gatePassLinePieces` as an expression: `{ delivered, sent, returned }` for a
+ * line of `qty` pieces whose linked rows' shares add up to `sums`.
+ */
+export function linePiecesExpression(
+  qty: unknown,
+  sums: { delivered: unknown; dispatched: unknown; returned: unknown },
+) {
+  const within = (total: unknown, ceiling: unknown) => ({
+    $max: [0, { $min: [ceiling, { $round: [total, 0] }] }],
+  })
+
+  return {
+    $let: {
+      vars: { out: within(sums.dispatched, qty) },
+      in: {
+        $let: {
+          vars: { delivered: { $min: ['$$out', within(sums.delivered, qty)] } },
+          in: {
+            delivered: '$$delivered',
+            sent: { $subtract: ['$$out', '$$delivered'] },
+            returned: within(sums.returned, { $subtract: [qty, '$$out'] }),
+          },
+        },
+      },
+    },
+  }
+}
 
 /** What the challans linked to one gate pass line say about it. */
 export interface GatePassLineDelivery {
@@ -118,39 +268,48 @@ export interface GatePassLineDelivery {
    * caller knows what the line carries.
    */
   deliveredQty: number
+  /** Pieces out of the gate whose signed copy is not back — `gatePassLinePieces`. */
+  sentQty: number
+  /** Pieces back at the depot and not out again — `gatePassLinePieces`. */
+  returnedQty: number
   status: GatePassProductStatus
 }
 
 /**
  * Delivery by gate pass and model key, for a page of gate passes — one
- * grouped read over the link index, whatever the page holds.
+ * grouped read over the link index, whatever the page holds. The gate passes
+ * come with their items, because whether a returned piece is still on the
+ * shelf depends on what the line carries (`gatePassProductStatusFor`).
  */
 export async function deliveryByGatePassLine(
-  gatePassIds: IdLike[],
+  gatePasses: Pick<GatePassDocument, '_id' | 'items'>[],
 ): Promise<Map<string, Map<string, GatePassLineDelivery>>> {
   const result = new Map<string, Map<string, GatePassLineDelivery>>()
-  if (gatePassIds.length === 0) {
+  if (gatePasses.length === 0) {
     return result
   }
+  const carried = new Map(gatePasses.map((gatePass) => [String(gatePass._id), gatePassQtyByModel(gatePass)]))
 
   const rows = await TripDoLineModel.aggregate<{
     _id: { gatePassId: Types.ObjectId; modelKey: string }
     linkedQty: number
-    rows: LinkedRowState[]
+    rows: (LinkedRowState & { challanId: Types.ObjectId })[]
   }>([
-    { $match: { 'link.gatePassId': { $in: gatePassIds.map(toObjectId) } } },
+    { $match: { 'link.gatePassId': { $in: gatePasses.map((gatePass) => toObjectId(gatePass._id)) } } },
     {
       $group: {
         _id: { gatePassId: '$link.gatePassId', modelKey: LINKED_LINE_KEY },
-        // Returns and re-sends are pieces an order row already counts.
+        // Whether anything is on a challan yet: order pieces, returns aside.
         linkedQty: { $sum: { $cond: [{ $eq: ['$kind', 'Order'] }, '$qty', 0] } },
         rows: {
           $push: {
+            challanId: '$challanId',
             kind: '$kind',
             deliveryStatus: '$deliveryStatus',
             qty: '$qty',
             lineQty: '$lineQty',
             firstDeliveredQty: '$firstDeliveredQty',
+            firstDispatchedQty: '$firstDispatchedQty',
           },
         },
       },
@@ -160,10 +319,15 @@ export async function deliveryByGatePassLine(
   for (const row of rows) {
     const key = String(row._id.gatePassId)
     const lines = result.get(key) ?? new Map<string, GatePassLineDelivery>()
+    const states = row.rows.map((state) => ({ ...state, challanId: String(state.challanId) }))
+    const lineQty = carried.get(key)?.get(row._id.modelKey) ?? Number.POSITIVE_INFINITY
+    const pieces = gatePassLinePieces(lineQty, states)
     lines.set(row._id.modelKey, {
       linkedQty: row.linkedQty,
-      deliveredQty: gatePassLineDeliveredQty(Number.POSITIVE_INFINITY, row.rows),
-      status: gatePassProductStatusFor(row.rows),
+      deliveredQty: gatePassLineDeliveredQty(Number.POSITIVE_INFINITY, states),
+      sentQty: pieces.sent,
+      returnedQty: pieces.returned,
+      status: gatePassProductStatusFor(states, lineQty),
     })
     result.set(key, lines)
   }
@@ -223,26 +387,22 @@ export async function assertGatePassEditKeepsLinks(
   gatePassId: IdLike,
   items: { model: string; qty: number }[],
 ): Promise<void> {
-  // Per line: the order pieces added up, and the largest single return or
-  // re-send — those do not add to the order, but each must still fit the line.
-  const linked = await TripDoLineModel.aggregate<{
-    _id: string
-    orderQty: number
-    otherQty: number
-    model: string
-  }>([
-    { $match: { 'link.gatePassId': toObjectId(gatePassId) } },
-    {
-      $group: {
-        _id: LINKED_LINE_KEY,
-        orderQty: { $sum: { $cond: [{ $eq: ['$kind', 'Order'] }, '$qty', 0] } },
-        otherQty: { $max: { $cond: [{ $eq: ['$kind', 'Order'] }, 0, '$qty'] } },
-        model: { $first: { $ifNull: ['$link.model', '$productModel'] } },
-      },
-    },
-  ])
+  const linked = await TripDoLineModel.find({ 'link.gatePassId': toObjectId(gatePassId) }).select(
+    'challanId kind qty link productModel productModelKey',
+  )
   if (linked.length === 0) {
     return
+  }
+
+  const lines = new Map<string, { model: string; rows: LineUseRow[]; largestReturn: number }>()
+  for (const row of linked) {
+    const key = rowLineKey(row)
+    const line = lines.get(key) ?? { model: row.link?.model || row.productModel, rows: [], largestReturn: 0 }
+    line.rows.push({ challanId: String(row.challanId), kind: row.kind, qty: row.qty })
+    if (row.kind === 'Return') {
+      line.largestReturn = Math.max(line.largestReturn, row.qty)
+    }
+    lines.set(key, line)
   }
 
   const carried = new Map<string, number>()
@@ -251,13 +411,15 @@ export async function assertGatePassEditKeepsLinks(
     carried.set(key, (carried.get(key) ?? 0) + item.qty)
   }
 
-  for (const line of linked) {
-    const qty = carried.get(line._id) ?? 0
-    const needed = Math.max(line.orderQty, line.otherQty)
+  // Per line: what the challans are holding of it, and the largest single
+  // return — a return gives pieces back, but it still has to fit the line.
+  for (const [key, line] of lines) {
+    const qty = carried.get(key) ?? 0
+    const needed = Math.max(lineHeldQty(line.rows), line.largestReturn)
     if (needed > qty) {
       throw new AppError(
         409,
-        `${needed} ${line.model || line._id} ${needed === 1 ? 'piece is' : 'pieces are'} ` +
+        `${needed} ${line.model || key} ${needed === 1 ? 'piece is' : 'pieces are'} ` +
           `linked to challans on the Trip DO sheet, so this gate pass cannot carry ${qty}. ` +
           'Remove the Trip DO from those rows first.',
       )

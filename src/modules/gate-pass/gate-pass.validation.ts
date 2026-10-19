@@ -1,6 +1,6 @@
 import * as z from 'zod'
 import { columnFiltersParam } from '../../utils/column-filters'
-import { GATE_PASS_COLUMN_IDS } from './gate-pass.columns'
+import { GATE_PASS_COLUMN_IDS, GATE_PASS_PIECE_FILTERS } from './gate-pass.columns'
 import {
   GATE_PASS_REFERENCE_TYPES,
   MAX_GATE_PASS_ITEMS,
@@ -180,6 +180,8 @@ const gatePassFilterFields = {
   search: z.string().trim().max(120).default(''),
   /** The column dropdowns' ticked values — see `gate-pass.columns.ts`. */
   columns: columnFiltersParam(GATE_PASS_COLUMN_IDS),
+  /** A delivery card pressed: lines with pieces in that bucket — see `lineHasPieces`. */
+  pieces: z.enum(GATE_PASS_PIECE_FILTERS).default('all'),
   referenceType: z.enum(['all', ...GATE_PASS_REFERENCE_TYPES]).default('all'),
   /** Whether what it carried is on a bill — see the Bill module. */
   bill: z.enum(['all', 'unbilled', 'partial', 'billed']).default('all'),

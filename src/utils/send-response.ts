@@ -66,6 +66,9 @@ export interface ResponseMeta {
   /** Gate Pass: pieces the linked challans say were delivered, and the rest. */
   deliveredQty?: number
   notDeliveredQty?: number
+  /** Gate Pass: of the rest, pieces out with no signed copy yet, and back at the depot. */
+  sentQty?: number
+  returnedQty?: number
   /** Trip DO: matching rows that are a return, and that are a re-send. */
   returnRows?: number
   resentRows?: number

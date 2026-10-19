@@ -15,8 +15,11 @@ import {
   assertGatePassNotLinked,
   DELIVERED_SHARE,
   deliveryByGatePassLine,
+  DISPATCHED_SHARE,
   LINKED_LINE_KEY,
+  linePiecesExpression,
   refreshGatePassLinkCopies,
+  RETURNED_SHARE,
 } from '../trip-do/trip-do.links'
 import type { GatePassLineDelivery } from '../trip-do/trip-do.links'
 import { TripDoLineModel } from '../trip-do/trip-do.model'
@@ -41,9 +44,11 @@ import {
   gatePassColumnValuesStages,
   hasDeliveryFilter,
   lineConditions,
+  lineHasPieces,
   lineMatchesColumns,
   recordFilterClauses,
 } from './gate-pass.columns'
+import type { GatePassColumnFilters, GatePassPieceFilter, LinePieceState } from './gate-pass.columns'
 import type {
   CreateGatePassInput,
   DuplicateQuery,
@@ -70,6 +75,9 @@ export interface ListGatePassesResult {
   /** Pieces on the matching gate passes that challans say were delivered, and the rest. */
   deliveredQty: number
   notDeliveredQty: number
+  /** Of the rest: out of the gate with no signed copy yet, and back at the depot. */
+  sentQty: number
+  returnedQty: number
   /**
    * Every quantity on every matching record, not just the page on screen.
    * The whole point of the figure is that it answers "how much did these
@@ -228,9 +236,34 @@ function baseListFilter(query: GatePassFilterQuery, viewer: UserDocument): Query
  */
 const MAX_DELIVERY_SCAN = 5000
 
+interface CandidateLine {
+  item: GatePassDocument['items'][number]
+  status: string
+  pieces: LinePieceState
+}
+
 interface LineCandidate {
   record: GatePassDocument
-  lines: { item: GatePassDocument['items'][number]; status: string }[]
+  lines: CandidateLine[]
+}
+
+const NO_PIECES: LinePieceState = { deliveredQty: 0, sentQty: 0, returnedQty: 0 }
+
+/** Whether one line meets the line filters, the delivery card included. */
+function lineKept(
+  line: CandidateLine,
+  columns: GatePassColumnFilters,
+  pieces: GatePassPieceFilter,
+): boolean {
+  return (
+    lineMatchesColumns(line.item, line.status, columns) &&
+    lineHasPieces(line.item.qty, line.pieces, pieces)
+  )
+}
+
+/** Whether a filter needs the Trip DO links, which only memory can read. */
+function needsLineScan(columns: GatePassColumnFilters, pieces: GatePassPieceFilter): boolean {
+  return hasDeliveryFilter(columns) || pieces !== 'all'
 }
 
 async function loadLineCandidates(filter: QueryFilter<GatePass>): Promise<LineCandidate[]> {
@@ -245,35 +278,36 @@ async function loadLineCandidates(filter: QueryFilter<GatePass>): Promise<LineCa
     )
   }
 
-  const delivery = await deliveryByGatePassLine(records.map((record) => record._id))
+  const delivery = await deliveryByGatePassLine(records)
   return records.map((record) => {
     const lines = delivery.get(String(record._id))
     return {
       record,
-      lines: record.items.map((item) => ({
-        item,
-        status: lines?.get(item.productModelKey)?.status ?? 'Unlinked',
-      })),
+      lines: record.items.map((item) => {
+        const line = lines?.get(item.productModelKey)
+        return { item, status: line?.status ?? 'Unlinked', pieces: line ?? NO_PIECES }
+      }),
     }
   })
 }
 
 /**
- * The records list filter. Without a delivery status tick it is the database
- * filter alone; with one, it is narrowed to the gate passes one of whose lines
- * meets every line filter *and* reads a ticked delivery status.
+ * The records list filter. Without a delivery status tick or a pressed
+ * delivery card it is the database filter alone; with either, it is narrowed
+ * to the gate passes one of whose lines meets every line filter *and* reads a
+ * ticked delivery status *and* holds pieces in the pressed card's bucket.
  */
 async function buildListFilter(
   query: GatePassFilterQuery,
   viewer: UserDocument,
 ): Promise<QueryFilter<GatePass>> {
   const base = baseListFilter(query, viewer)
-  if (!hasDeliveryFilter(query.columns)) {
+  if (!needsLineScan(query.columns, query.pieces)) {
     return base
   }
 
   const ids = (await loadLineCandidates(base))
-    .filter(({ lines }) => lines.some((line) => lineMatchesColumns(line.item, line.status, query.columns)))
+    .filter(({ lines }) => lines.some((line) => lineKept(line, query.columns, query.pieces)))
     .map(({ record }) => record._id)
 
   return { $and: [base, { _id: { $in: ids } }] }
@@ -293,7 +327,7 @@ export async function listGatePassColumnValues(
   delete columns[column]
   const others = { ...rest, columns }
 
-  if (column !== 'delivery' && !hasDeliveryFilter(columns)) {
+  if (column !== 'delivery' && !needsLineScan(columns, others.pieces)) {
     const rows = await GatePassModel.aggregate<{ _id: ColumnValue; count: number }>([
       { $match: baseListFilter(others, viewer) },
       ...gatePassColumnValuesStages(column, columns),
@@ -304,7 +338,7 @@ export async function listGatePassColumnValues(
   const counts = new Map<string, { value: ColumnValue; count: number }>()
   for (const { record, lines } of await loadLineCandidates(baseListFilter(others, viewer))) {
     for (const line of lines) {
-      if (!lineMatchesColumns(line.item, line.status, columns)) continue
+      if (!lineKept(line, columns, others.pieces)) continue
       const value = gatePassColumnValue(column, record, line.item, line.status)
       const key = JSON.stringify(value)
       const entry = counts.get(key) ?? { value, count: 0 }
@@ -342,16 +376,25 @@ async function totalsFor(filter: QueryFilter<GatePass>): Promise<GatePassTotals>
   return row ?? { total: 0, totalQty: 0 }
 }
 
+interface PieceTotals {
+  deliveredQty: number
+  sentQty: number
+  returnedQty: number
+}
+
 /**
- * Delivered pieces over every matching gate pass — the figure behind the
- * Delivered / Not delivered cards, so it answers the filters like `totalQty`.
+ * Delivered, sent and returned pieces over every matching gate pass — the
+ * figures behind the delivery cards, so they answer the filters like
+ * `totalQty`. Each line is `gatePassLinePieces`, worked out in the database.
  *
  * Lines are grouped by model before the lookup, so a gate pass carrying one
- * model on two lines cannot count the same delivered pieces twice, and each
- * model's delivered figure is capped at what the gate pass carries.
+ * model on two lines cannot count the same pieces twice, and each model's
+ * figures are capped at what the gate pass carries.
  */
-async function deliveredQtyFor(filter: QueryFilter<GatePass>): Promise<number> {
-  const [row] = await GatePassModel.aggregate<{ deliveredQty: number }>([
+async function piecesFor(filter: QueryFilter<GatePass>): Promise<PieceTotals> {
+  const sum = (field: string) => ({ $ifNull: [{ $first: `$links.${field}` }, 0] })
+
+  const [row] = await GatePassModel.aggregate<PieceTotals>([
     { $match: filter },
     { $unwind: '$items' },
     {
@@ -375,28 +418,38 @@ async function deliveredQtyFor(filter: QueryFilter<GatePass>): Promise<number> {
               },
             },
           },
-          // Order rows' first delivery, less linked returns, plus linked re-sends.
-          { $group: { _id: null, qty: { $sum: DELIVERED_SHARE } } },
+          {
+            $group: {
+              _id: null,
+              delivered: { $sum: DELIVERED_SHARE },
+              dispatched: { $sum: DISPATCHED_SHARE },
+              returned: { $sum: RETURNED_SHARE },
+            },
+          },
         ],
-        as: 'delivered',
+        as: 'links',
+      },
+    },
+    {
+      $project: {
+        pieces: linePiecesExpression('$qty', {
+          delivered: sum('delivered'),
+          dispatched: sum('dispatched'),
+          returned: sum('returned'),
+        }),
       },
     },
     {
       $group: {
         _id: null,
-        deliveredQty: {
-          $sum: {
-            $min: [
-              '$qty',
-              { $max: [0, { $round: [{ $ifNull: [{ $first: '$delivered.qty' }, 0] }, 0] }] },
-            ],
-          },
-        },
+        deliveredQty: { $sum: '$pieces.delivered' },
+        sentQty: { $sum: '$pieces.sent' },
+        returnedQty: { $sum: '$pieces.returned' },
       },
     },
   ])
 
-  return row?.deliveredQty ?? 0
+  return row ?? { deliveredQty: 0, sentQty: 0, returnedQty: 0 }
 }
 
 export async function listGatePasses(
@@ -406,15 +459,15 @@ export async function listGatePasses(
   const filter = await buildListFilter(query, viewer)
   const skip = (query.page - 1) * query.limit
 
-  const [records, totals, deliveredQty] = await Promise.all([
+  const [records, totals, pieces] = await Promise.all([
     GatePassModel.find(filter).sort({ createdAt: -1 }).skip(skip).limit(query.limit),
     totalsFor(filter),
-    deliveredQtyFor(filter),
+    piecesFor(filter),
   ])
 
   const [names, delivery] = await Promise.all([
     resolveActorNames(records),
-    deliveryByGatePassLine(records.map((record) => record._id)),
+    deliveryByGatePassLine(records),
   ])
 
   return {
@@ -426,7 +479,7 @@ export async function listGatePasses(
           (item) =>
             lines?.get(item.productModelKey) ?? {
               linkedQty: 0,
-              deliveredQty: 0,
+              ...NO_PIECES,
               status: 'Unlinked' as const,
             },
         ),
@@ -434,8 +487,10 @@ export async function listGatePasses(
     }),
     total: totals.total,
     totalQty: totals.totalQty,
-    deliveredQty,
-    notDeliveredQty: Math.max(0, totals.totalQty - deliveredQty),
+    deliveredQty: pieces.deliveredQty,
+    notDeliveredQty: Math.max(0, totals.totalQty - pieces.deliveredQty),
+    sentQty: pieces.sentQty,
+    returnedQty: pieces.returnedQty,
   }
 }
 

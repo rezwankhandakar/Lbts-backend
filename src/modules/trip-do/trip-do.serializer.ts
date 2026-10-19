@@ -71,6 +71,12 @@ export interface TripDoRowRecord {
   /** How many rows this row's line is divided into, itself included. */
   partCount: number
   splitIndex: number
+  /**
+   * Order rows: pieces that came back off another challan and went out again
+   * on this one, which the sheet tags Re-sent — `rowsCarryingReturns`. Zero
+   * for every other row.
+   */
+  fromReturnQty: number
 }
 
 export interface TripDoBillRef {
@@ -125,6 +131,7 @@ export function toTripDoRow(
   row: TripDoLineDocument,
   partCount: number,
   names: Map<string, string>,
+  fromReturnQty = 0,
 ): TripDoRowRecord {
   const link = row.link
 
@@ -170,6 +177,7 @@ export function toTripDoRow(
     bill: row.bill ? { billId: String(row.bill.billId), billNumber: row.bill.billNumber } : null,
     partCount,
     splitIndex: row.splitIndex,
+    fromReturnQty,
   }
 }
 
@@ -195,12 +203,15 @@ export interface GatePassOption {
   productName: string
   model: string
   qty: number
-  /** Linked by other order rows. */
+  /**
+   * What the line is holding for other rows — the line less `remainingQty`.
+   * For a return row, what the challans on it hold.
+   */
   allocatedQty: number
   /**
-   * What this row may still link. For a return or re-sent row that is the whole
-   * line, because those pieces do not use the line up — see
-   * `countsTowardGatePassQty`.
+   * What this row may still link (`lineRoomFor`) — a linked return having given
+   * its pieces back. For a return row that is the whole line, because a return
+   * takes no room — see `countsTowardGatePassQty`.
    */
   remainingQty: number
   /** Whether linking this row uses up the line's quantity. */
@@ -226,15 +237,19 @@ export interface GatePassLinkedRow {
   qty: number
   deliveryStatus: RowDeliveryStatus
   tripNumbers: string[]
+  /** See `TripDoRowRecord.fromReturnQty`. */
+  fromReturnQty: number
 }
 
 export interface GatePassProductLine {
   productName: string
   model: string
   qty: number
+  /** What the challans are holding of the line: order and re-sent pieces, less returns (`lineHeldQty`). */
   linkedQty: number
   /** Order rows' first delivery, less linked returns, plus linked re-sends. */
   deliveredQty: number
+  /** Free to link — including pieces a linked return gave back. */
   remainingQty: number
   status: GatePassProductStatus
   rows: GatePassLinkedRow[]
@@ -251,7 +266,7 @@ export interface GatePassTripDoStatus {
   lines: GatePassProductLine[]
 }
 
-export function toLinkedRow(row: TripDoLineDocument): GatePassLinkedRow {
+export function toLinkedRow(row: TripDoLineDocument, fromReturnQty = 0): GatePassLinkedRow {
   return {
     id: String(row._id),
     challanId: String(row.challanId),
@@ -264,5 +279,6 @@ export function toLinkedRow(row: TripDoLineDocument): GatePassLinkedRow {
     qty: row.qty,
     deliveryStatus: row.deliveryStatus as RowDeliveryStatus,
     tripNumbers: [...row.tripNumbers],
+    fromReturnQty,
   }
 }

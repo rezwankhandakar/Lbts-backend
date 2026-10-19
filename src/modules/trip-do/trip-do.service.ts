@@ -20,14 +20,28 @@ import {
   countsTowardGatePassQty,
   gatePassLineDeliveredQty,
   gatePassProductStatusFor,
+  gatePassStatusOfLines,
+  lineHeldQty,
+  lineRoomFor,
+  rowsCarryingReturns,
 } from './trip-do.constants'
-import type { LinkedRowState, RowDeliveryStatus } from './trip-do.constants'
+import type {
+  LineHistoryRow,
+  LineUseRow,
+  LinkedRowState,
+  RowDeliveryStatus,
+} from './trip-do.constants'
 import {
   LINKED_LINE_KEY,
-  allocatedByModel,
+  gatePassQtyByModel,
+  historyRowOf,
   linkCopyFor,
+  placedRowsOn,
+  returnedPiecesOnRows,
   rowLineKey,
+  rowsOnLine,
 } from './trip-do.links'
+import type { PlacedRow } from './trip-do.links'
 import { planBulkLink } from './trip-do.ledger'
 import { customerMatch, productLineMatch } from './trip-do.matching'
 import type { MatchResult } from './trip-do.matching'
@@ -125,11 +139,14 @@ async function partCountsFor(rows: TripDoLineDocument[]): Promise<Map<string, nu
 }
 
 async function serializeRows(rows: TripDoLineDocument[]): Promise<TripDoRowRecord[]> {
-  const [counts, names] = await Promise.all([
+  const [counts, names, fromReturns] = await Promise.all([
     partCountsFor(rows),
     resolveNames(rows.map((row) => row.link?.linkedBy)),
+    returnedPiecesOnRows(rows),
   ])
-  return rows.map((row) => toTripDoRow(row, counts.get(row.sourceKey) ?? 1, names))
+  return rows.map((row) =>
+    toTripDoRow(row, counts.get(row.sourceKey) ?? 1, names, fromReturns.get(String(row._id)) ?? 0),
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -445,7 +462,16 @@ function rankOf(match: MatchResult): number {
  * gate pass whatever its lines say — somebody holding the gate pass knows.
  *
  * For a return or re-sent row, the Trip DO its order row already has is offered
- * first, and it is never shown as full: those pieces do not use a line up.
+ * first. A return is never shown as full — it gives pieces back rather than
+ * taking them. A re-send is: it takes its pieces back off the line, and when
+ * the order row's gate pass has since given its returned pieces to another
+ * challan, there is nothing left there for it.
+ *
+ * **A returned piece is free again.** A line's room is what it carries less
+ * what the challans on it are holding (`lineHeldQty`), and a linked return
+ * takes its pieces off its own challan's hold — so once the return row has the
+ * order row's Trip DO, another challan's row is offered that gate pass for
+ * them.
  */
 export async function listGatePassOptions(rowId: string, q: string): Promise<GatePassOption[]> {
   const row = await findRow(rowId)
@@ -511,22 +537,38 @@ export async function listGatePassOptions(rowId: string, q: string): Promise<Gat
     return []
   }
 
-  const allocations = await TripDoLineModel.aggregate<{
-    _id: { gatePassId: Types.ObjectId; lineKey: string }
+  // Every other row on these lines, by challan and kind — a line's room is
+  // worked out per challan, so a return frees what its own challan took.
+  const placed = await TripDoLineModel.aggregate<{
+    _id: { gatePassId: Types.ObjectId; lineKey: string; challanId: Types.ObjectId; kind: string }
     qty: number
   }>([
     {
       $match: {
         'link.gatePassId': { $in: [...gatePasses.values()].map((gatePass) => gatePass._id) },
-        kind: 'Order',
         _id: { $ne: row._id },
       },
     },
-    { $group: { _id: { gatePassId: '$link.gatePassId', lineKey: LINKED_LINE_KEY }, qty: { $sum: '$qty' } } },
+    {
+      $group: {
+        _id: {
+          gatePassId: '$link.gatePassId',
+          lineKey: LINKED_LINE_KEY,
+          challanId: '$challanId',
+          kind: '$kind',
+        },
+        qty: { $sum: '$qty' },
+      },
+    },
   ])
-  const allocated = new Map(
-    allocations.map((entry) => [`${String(entry._id.gatePassId)}|${entry._id.lineKey}`, entry.qty]),
-  )
+  const onLine = new Map<string, LineUseRow[]>()
+  for (const entry of placed) {
+    const key = `${String(entry._id.gatePassId)}|${entry._id.lineKey}`
+    onLine.set(key, [
+      ...(onLine.get(key) ?? []),
+      { challanId: String(entry._id.challanId), kind: entry._id.kind, qty: entry.qty },
+    ])
+  }
 
   const rowProduct = { productName: row.productName, model: row.productModel }
   const currentKey = row.link ? `${String(row.link.gatePassId)}|${rowLineKey(row)}` : null
@@ -556,7 +598,8 @@ export async function listGatePassOptions(rowId: string, q: string): Promise<Gat
         continue
       }
 
-      const taken = allocated.get(optionKey) ?? 0
+      const others = onLine.get(optionKey) ?? []
+      const room = countsTowardQty ? lineRoomFor(line.qty, others, String(row.challanId)) : line.qty
       ranked.push({
         rank: rankOf(match) * 2 + rankOf(customer),
         option: {
@@ -574,8 +617,8 @@ export async function listGatePassOptions(rowId: string, q: string): Promise<Gat
           productName: line.productName,
           model: line.model,
           qty: line.qty,
-          allocatedQty: taken,
-          remainingQty: countsTowardQty ? Math.max(0, line.qty - taken) : line.qty,
+          allocatedQty: countsTowardQty ? Math.max(0, line.qty - room) : lineHeldQty(others),
+          remainingQty: room,
           countsTowardQty,
           modelMatch: match.level,
           customerMatch: customer.level,
@@ -648,6 +691,7 @@ function partOf(
     lineQty: row.lineQty,
     lineAmount: row.lineAmount,
     firstDeliveredQty: row.firstDeliveredQty ?? null,
+    firstDispatchedQty: row.firstDispatchedQty ?? null,
     tripNumbers: [...row.tripNumbers],
     deliveryStatus: row.deliveryStatus,
     qty,
@@ -673,19 +717,108 @@ export interface TripDoLinkResult {
   rows: number
 }
 
-function refuseOverAllocation(
+/** A row the write puts on a gate pass line: one being linked, or a part a split leaves behind. */
+interface ArrivingRow extends PlacedRow {
+  /** Being linked by this write, rather than left where it was. */
+  incoming: boolean
+}
+
+function placedFrom(row: TripDoLineDocument, qty: number, lineKey: string, incoming: boolean): ArrivingRow {
+  return {
+    id: incoming ? String(row._id) : `${String(row._id)}:rest`,
+    challanId: String(row.challanId),
+    kind: row.kind,
+    qty,
+    lineKey,
+    incoming,
+  }
+}
+
+/**
+ * Refuses a write that would leave a line on one gate pass holding more than
+ * it carries.
+ *
+ * `leaving` is every row the write takes off this gate pass, and `arriving`
+ * what it puts back: the rows being linked, and any part a split leaves on its
+ * old Trip DO. A line is refused only when the write **raises** what it holds
+ * past what it carries — a line already over, because a return was taken back
+ * off a trip after its pieces went to another challan, can still be brought
+ * down.
+ *
+ * Two different things raise a line, and each is told so. Linking takes pieces
+ * off it. Taking a **return** off it puts back pieces it had freed — and if
+ * another challan has been given them since, the return has to stay.
+ */
+function assertLinesHold(
   gatePass: GatePassDocument,
-  model: string,
-  capacity: number,
-  allocated: number,
-): never {
-  const remaining = Math.max(0, capacity - allocated)
-  throw new AppError(
-    409,
-    remaining === 0
-      ? `Every ${model} on ${gatePass.gatePassId} (Trip DO ${gatePass.tripDo}) is already linked — ${allocated} of ${capacity}.`
-      : `${gatePass.gatePassId} (Trip DO ${gatePass.tripDo}) has only ${remaining} ${model} left to link, of ${capacity}. Link ${remaining} and leave the rest for another Trip DO.`,
-  )
+  placed: readonly PlacedRow[],
+  leaving: ReadonlySet<string>,
+  arriving: readonly ArrivingRow[],
+): void {
+  const after = [...placed.filter((row) => !leaving.has(row.id)), ...arriving]
+  const carried = gatePassQtyByModel(gatePass)
+  const label = `${gatePass.gatePassId} (Trip DO ${gatePass.tripDo})`
+
+  for (const lineKey of new Set([...placed, ...arriving].map((row) => row.lineKey))) {
+    const capacity = carried.get(lineKey) ?? 0
+    const held = lineHeldQty(rowsOnLine(after, lineKey))
+    if (held <= capacity || held <= lineHeldQty(rowsOnLine(placed, lineKey))) {
+      continue
+    }
+    const model =
+      linesOf(gatePass).find((line) => line.modelKey === lineKey)?.model || lineKey
+
+    const incoming = arriving.filter((row) => row.incoming && row.lineKey === lineKey)
+    if (incoming.length === 0) {
+      throw new AppError(
+        409,
+        `The ${model} that came back on this return are on another row now — without the return, ${label} ` +
+          `would hold ${held} of ${capacity}. Take the Trip DO off that row first.`,
+      )
+    }
+
+    const ids = new Set(incoming.map((row) => row.id))
+    const room = Math.max(0, capacity - lineHeldQty(rowsOnLine(after, lineKey).filter((row) => !ids.has(row.id))))
+    throw new AppError(
+      409,
+      room === 0
+        ? `Every ${model} on ${label} is already linked — ${capacity} of ${capacity}.`
+        : `${label} has only ${room} ${model} left to link, of ${capacity}. Link ${room} and leave the rest for another Trip DO.`,
+    )
+  }
+}
+
+/**
+ * `assertLinesHold` for the gate passes a write's rows are leaving — only a
+ * return's leaving can raise a line, so only those are read.
+ */
+async function assertReturnsCanLeave(
+  moves: readonly { row: TripDoLineDocument; staying: number }[],
+  exceptGatePassId: string | null,
+): Promise<void> {
+  const byGatePass = new Map<string, { row: TripDoLineDocument; staying: number }[]>()
+  for (const move of moves) {
+    const from = move.row.link?.gatePassId
+    if (move.row.kind !== 'Return' || !from || String(from) === exceptGatePassId) {
+      continue
+    }
+    byGatePass.set(String(from), [...(byGatePass.get(String(from)) ?? []), move])
+  }
+
+  for (const [gatePassId, leavingRows] of byGatePass) {
+    const gatePass = await GatePassModel.findById(gatePassId)
+    if (!gatePass) {
+      continue
+    }
+    assertLinesHold(
+      gatePass,
+      await placedRowsOn(gatePass._id),
+      new Set(leavingRows.map(({ row }) => String(row._id))),
+      leavingRows
+        .filter(({ staying }) => staying > 0)
+        .map(({ row, staying }) => placedFrom(row, staying, rowLineKey(row), false)),
+    )
+  }
 }
 
 /** A return or re-send may sit on a line that carries at least that many. */
@@ -706,14 +839,15 @@ function refuseOversizedReturn(
  * Sets a Trip DO on one row, splitting it when the link takes less than the row.
  *
  * The gate pass has to be filed and has to carry the row's product — the same
- * model, or one close to it (`resolveLine`). An order row also needs that many
- * pieces not already linked elsewhere — five on the gate pass can be three on
- * one challan and two on another, never three and three. A return or re-sent
- * row does not use the line up, so it may take the Trip DO its order row
- * already filled. The rest of
- * a split row keeps whatever Trip DO the row had before, so moving part of a
- * row from one gate pass to another never silently unlinks the part left
- * behind.
+ * model, or one close to it (`resolveLine`). An order or re-sent row also needs
+ * that many pieces the line is not already holding — five on the gate pass can
+ * be three on one challan and two on another, never three and three — and a
+ * linked return has given back what came off its trip (`lineHeldQty`), so its
+ * pieces can go to another challan. A return needs no room, so it may take the
+ * Trip DO its order row already filled; what it may not do is leave a gate
+ * pass whose freed pieces have since gone to another row. The rest of a split
+ * row keeps whatever Trip DO the row had before, so moving part of a row from
+ * one gate pass to another never silently unlinks the part left behind.
  */
 export async function linkRow(
   rowId: string,
@@ -730,18 +864,18 @@ export async function linkRow(
   }
 
   const line = resolveLine(gatePass, row, input.lineKey)
-
-  if (countsTowardGatePassQty(row.kind)) {
-    const allocated = (await allocatedByModel(gatePass._id, [row._id])).get(line.modelKey) ?? 0
-    if (allocated + qty > line.qty) {
-      refuseOverAllocation(gatePass, line.model, line.qty, allocated)
-    }
-  } else if (qty > line.qty) {
-    refuseOversizedReturn(gatePass, row, line, qty)
-  }
-
   const previous = row.link ?? null
   const remainderQty = row.qty - qty
+  const stayingHere = previous !== null && String(previous.gatePassId) === String(gatePass._id)
+
+  if (!countsTowardGatePassQty(row.kind) && qty > line.qty) {
+    refuseOversizedReturn(gatePass, row, line, qty)
+  }
+  await assertReturnsCanLeave([{ row, staying: remainderQty }], String(gatePass._id))
+  assertLinesHold(gatePass, await placedRowsOn(gatePass._id), new Set([String(row._id)]), [
+    placedFrom(row, qty, line.modelKey, true),
+    ...(stayingHere && remainderQty > 0 ? [placedFrom(row, remainderQty, rowLineKey(row), false)] : []),
+  ])
   const link = linkCopyFor(gatePass, line, actor)
 
   if (remainderQty > 0) {
@@ -783,9 +917,9 @@ export async function linkRow(
  * than a split by hand first.
  *
  * Otherwise all or nothing: every linked row's product has to be on the gate
- * pass (or close to a line on it), and the order pieces added up have to fit.
- * Returns and re-sends ride along without using the line up, as they do one at
- * a time.
+ * pass (or close to a line on it), and what the line would then hold has to
+ * fit — order and re-sent pieces taking room, returns giving it back, exactly
+ * as they do one at a time.
  */
 export async function bulkLinkRows(
   input: BulkLinkInput,
@@ -815,43 +949,34 @@ export async function bulkLinkRows(
     .filter(({ linkQty }) => linkQty > 0)
 
   const gatePass = await findLinkableGatePass(input.gatePassId)
-  const allocated = await allocatedByModel(
-    gatePass._id,
-    moving.map(({ row }) => row._id),
-  )
-  // The part a split leaves behind keeps the row's old Trip DO, so when that
-  // was this gate pass it still uses the line up.
-  for (const { row, linkQty } of moving) {
-    const left = row.qty - linkQty
-    if (left > 0 && countsTowardGatePassQty(row.kind) && String(row.link?.gatePassId) === String(gatePass._id)) {
-      const key = rowLineKey(row)
-      allocated.set(key, (allocated.get(key) ?? 0) + left)
-    }
-  }
-
   const lineFor = new Map<string, GatePassLine>()
-  const wanted = new Map<string, { qty: number; line: GatePassLine }>()
+  const arriving: ArrivingRow[] = []
   for (const { row, linkQty } of moving) {
     const line = resolveLine(gatePass, row, input.lineKey)
     lineFor.set(String(row._id), line)
 
-    if (!countsTowardGatePassQty(row.kind)) {
-      if (linkQty > line.qty) {
-        refuseOversizedReturn(gatePass, row, line, linkQty)
-      }
-      continue
+    if (!countsTowardGatePassQty(row.kind) && linkQty > line.qty) {
+      refuseOversizedReturn(gatePass, row, line, linkQty)
     }
-    const entry = wanted.get(line.modelKey) ?? { qty: 0, line }
-    entry.qty += linkQty
-    wanted.set(line.modelKey, entry)
+    arriving.push(placedFrom(row, linkQty, line.modelKey, true))
+    // The part a split leaves behind keeps the row's old Trip DO, so when that
+    // was this gate pass it is still on the line.
+    const left = row.qty - linkQty
+    if (left > 0 && String(row.link?.gatePassId) === String(gatePass._id)) {
+      arriving.push(placedFrom(row, left, rowLineKey(row), false))
+    }
   }
 
-  for (const [key, entry] of wanted) {
-    const taken = allocated.get(key) ?? 0
-    if (taken + entry.qty > entry.line.qty) {
-      refuseOverAllocation(gatePass, entry.line.model, entry.line.qty, taken)
-    }
-  }
+  await assertReturnsCanLeave(
+    moving.map(({ row, linkQty }) => ({ row, staying: row.qty - linkQty })),
+    String(gatePass._id),
+  )
+  assertLinesHold(
+    gatePass,
+    await placedRowsOn(gatePass._id),
+    new Set(moving.map(({ row }) => String(row._id))),
+    arriving,
+  )
 
   // At most one row is split — the one the pieces ran out on — and its
   // remainder is written first, as `linkRow` writes it.
@@ -900,6 +1025,9 @@ export async function bulkLinkRows(
  * Takes the Trip DO off a row, and folds it back into any other unlinked part
  * of the same line — a piece without a Trip DO is a piece without a Trip DO,
  * and two rows saying so is noise on a sheet somebody reads by eye.
+ *
+ * A return whose freed pieces another row has since taken keeps its Trip DO:
+ * without it, the gate pass would be holding more than it carries.
  */
 export async function unlinkRow(rowId: string): Promise<{ qty: number }> {
   const row = await findRow(rowId)
@@ -907,6 +1035,7 @@ export async function unlinkRow(rowId: string): Promise<{ qty: number }> {
     return { qty: row.qty }
   }
   refuseBilled(row, 'left without a Trip DO')
+  await assertReturnsCanLeave([{ row, staying: 0 }], null)
   const gatePassId = row.link.gatePassId
 
   const siblings = await TripDoLineModel.find({
@@ -1016,12 +1145,15 @@ export async function getGatePassTripDoStatus(
   const rows = await TripDoLineModel.find({ 'link.gatePassId': gatePass._id }).sort(SHEET_ORDER)
   const lines = new Map<string, GatePassProductLine>()
   const statesByLine = new Map<string, LinkedRowState[]>()
+  const historyByLine = new Map<string, LineHistoryRow[]>()
   const stateOf = (row: TripDoLineDocument): LinkedRowState => ({
+    challanId: String(row.challanId),
     kind: row.kind,
     deliveryStatus: row.deliveryStatus as RowDeliveryStatus,
     qty: row.qty,
     lineQty: row.lineQty,
     firstDeliveredQty: row.firstDeliveredQty ?? null,
+    firstDispatchedQty: row.firstDispatchedQty ?? null,
   })
 
   for (const item of gatePass.items) {
@@ -1058,22 +1190,28 @@ export async function getGatePassTripDoStatus(
       status: 'Unlinked' as const,
       rows: [],
     }
-    // Returns and re-sends are listed, and are pieces an order row already counts.
-    if (countsTowardGatePassQty(row.kind)) {
-      line.linkedQty += row.qty
-    }
     line.rows.push(toLinkedRow(row))
     lines.set(key, line)
     statesByLine.set(key, [...(statesByLine.get(key) ?? []), stateOf(row)])
+    historyByLine.set(key, [...(historyByLine.get(key) ?? []), historyRowOf(row)])
   }
 
+  // A line's linked figure is what the challans are holding of it, so a return
+  // shows its pieces as free again (`lineHeldQty`).
   const result = [...lines.entries()].map(([key, line]) => {
     const states = statesByLine.get(key) ?? []
+    const held = lineHeldQty(states)
+    const fromReturns = rowsCarryingReturns(
+      historyByLine.get(key) ?? [],
+      line.qty > 0 ? line.qty : Number.POSITIVE_INFINITY,
+    )
     return {
       ...line,
+      rows: line.rows.map((linked) => ({ ...linked, fromReturnQty: fromReturns.get(linked.id) ?? 0 })),
+      linkedQty: held,
       deliveredQty: gatePassLineDeliveredQty(line.qty, states),
-      remainingQty: Math.max(0, line.qty - line.linkedQty),
-      status: gatePassProductStatusFor(states),
+      remainingQty: Math.max(0, line.qty - held),
+      status: gatePassProductStatusFor(states, line.qty > 0 ? line.qty : Number.POSITIVE_INFINITY),
     }
   })
 
@@ -1081,7 +1219,12 @@ export async function getGatePassTripDoStatus(
     gatePassId: String(gatePass._id),
     gatePassNumber: gatePass.gatePassId,
     tripDo: gatePass.tripDo,
-    status: gatePassProductStatusFor(rows.map(stateOf)),
+    status: gatePassStatusOfLines(
+      [...lines.entries()].map(([key, line]) => ({
+        qty: line.qty > 0 ? line.qty : Number.POSITIVE_INFINITY,
+        rows: statesByLine.get(key) ?? [],
+      })),
+    ),
     totalQty: result.reduce((sum, line) => sum + line.qty, 0),
     linkedQty: result.reduce((sum, line) => sum + line.linkedQty, 0),
     lines: result,

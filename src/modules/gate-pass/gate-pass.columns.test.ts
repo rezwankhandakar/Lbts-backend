@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 import {
   gatePassColumnValue,
   lineConditions,
+  lineHasPieces,
   lineMatchesColumns,
   recordFilterClauses,
 } from './gate-pass.columns'
@@ -61,6 +62,38 @@ describe('lineMatchesColumns', () => {
     assert.equal(lineMatchesColumns(FRIDGE, 'Returned', { model: ['WBQ-4D0-GTCE-HX'], delivery: ['Returned'] }), true)
     assert.equal(lineMatchesColumns(FRIDGE, 'Delivered', { model: ['WBQ-4D0-GTCE-HX'], delivery: ['Returned'] }), false)
     assert.equal(lineMatchesColumns(FRIDGE, 'Unlinked', {}), true)
+  })
+})
+
+describe('lineHasPieces', () => {
+  const pieces = (deliveredQty: number, sentQty = 0, returnedQty = 0) => ({
+    deliveredQty,
+    sentQty,
+    returnedQty,
+  })
+
+  it('keeps a line under every card it holds pieces for', () => {
+    const mixed = pieces(2, 1, 1)
+    assert.equal(lineHasPieces(4, mixed, 'delivered'), true)
+    assert.equal(lineHasPieces(4, mixed, 'notDelivered'), true)
+    assert.equal(lineHasPieces(4, mixed, 'sent'), true)
+    assert.equal(lineHasPieces(4, mixed, 'returned'), true)
+  })
+
+  it('leaves a fully delivered line out of Not Delivered, Sent and Returned', () => {
+    assert.equal(lineHasPieces(4, pieces(4), 'notDelivered'), false)
+    assert.equal(lineHasPieces(4, pieces(4), 'sent'), false)
+    assert.equal(lineHasPieces(4, pieces(4), 'returned'), false)
+  })
+
+  it('reads delivered pieces at no more than the line carries', () => {
+    // Two lines of one model share an uncapped figure.
+    assert.equal(lineHasPieces(2, pieces(5), 'notDelivered'), false)
+    assert.equal(lineHasPieces(4, pieces(0), 'delivered'), false)
+  })
+
+  it('keeps every line when no card is pressed', () => {
+    assert.equal(lineHasPieces(4, pieces(0), 'all'), true)
   })
 })
 

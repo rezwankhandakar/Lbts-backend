@@ -56,10 +56,8 @@ function idFrom(req: Request): string {
 
 export async function getGatePasses(req: Request, res: Response): Promise<void> {
   const query = req.validated?.query as ListGatePassesQuery
-  const { records, total, totalQty, deliveredQty, notDeliveredQty } = await listGatePasses(
-    query,
-    actorFrom(req),
-  )
+  const { records, total, totalQty, deliveredQty, notDeliveredQty, sentQty, returnedQty } =
+    await listGatePasses(query, actorFrom(req))
 
   sendResponse(res, {
     statusCode: 200,
@@ -75,6 +73,8 @@ export async function getGatePasses(req: Request, res: Response): Promise<void> 
       totalQty,
       deliveredQty,
       notDeliveredQty,
+      sentQty,
+      returnedQty,
     },
   })
 }
