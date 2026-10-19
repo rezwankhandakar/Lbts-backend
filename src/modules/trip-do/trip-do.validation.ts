@@ -89,9 +89,16 @@ export const linkRowSchema = z.object({
 })
 export type LinkRowInput = z.infer<typeof linkRowSchema>
 
+/**
+ * Setting one Trip DO on many rows. The rows are filled in the order listed;
+ * `qty` is optional and is the split — fewer pieces than the rows carry links
+ * them in order and splits the row they run out on (`planBulkLink`). Absent,
+ * every row is linked whole.
+ */
 export const bulkLinkSchema = z.object({
   gatePassId: objectId,
   lineKey,
+  qty: pieces.optional(),
   rowIds: z
     .array(objectId)
     .min(1, 'Choose at least one row.')

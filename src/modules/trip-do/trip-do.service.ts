@@ -28,6 +28,7 @@ import {
   linkCopyFor,
   rowLineKey,
 } from './trip-do.links'
+import { planBulkLink } from './trip-do.ledger'
 import { customerMatch, productLineMatch } from './trip-do.matching'
 import type { MatchResult } from './trip-do.matching'
 import { MAX_COLUMN_VALUES, columnFilterClause, columnValuesStages } from './trip-do.columns'
@@ -663,8 +664,12 @@ export interface TripDoLinkResult {
   unit: string
   /** Pieces linked. */
   qty: number
-  /** Pieces left on a row of their own because the link took less than the row. */
+  /**
+   * Pieces the link did not take: the part a split left on a row of its own,
+   * plus — for a bulk link — any ticked rows after it, left as they were.
+   */
   remainderQty: number
+  /** Rows the Trip DO was set on. */
   rows: number
 }
 
@@ -769,44 +774,75 @@ export async function linkRow(
  * Sets one Trip DO on many rows at once — a gate pass of five refrigerators
  * spread over three challans, chosen by ticking the three rows.
  *
- * All or nothing. Every row is linked whole, every row's product has to be on
- * the gate pass (or close to a line on it), and the order pieces added up have
- * to fit; a partial bulk link would leave the operator working out which of
- * twelve ticked rows actually changed. Returns and re-sends ride along without
- * using the line up, as they do one at a time.
+ * The rows are filled **in the order listed**. Without `qty` every row is
+ * linked whole; with fewer pieces than the rows carry, each is taken whole
+ * while the pieces last and the row they run out on is split exactly as
+ * `linkRow` splits one — the part left over keeps whatever Trip DO the row had
+ * — with any rows after it left as they were (`planBulkLink`). Twenty-six
+ * ticked against a gate pass with room for twenty-five is one press rather
+ * than a split by hand first.
+ *
+ * Otherwise all or nothing: every linked row's product has to be on the gate
+ * pass (or close to a line on it), and the order pieces added up have to fit.
+ * Returns and re-sends ride along without using the line up, as they do one at
+ * a time.
  */
 export async function bulkLinkRows(
   input: BulkLinkInput,
   actor: UserDocument,
 ): Promise<TripDoLinkResult> {
-  const rows = await TripDoLineModel.find({ _id: { $in: input.rowIds } })
-  if (rows.length !== input.rowIds.length) {
+  const found = await TripDoLineModel.find({ _id: { $in: input.rowIds } })
+  if (found.length !== input.rowIds.length) {
     throw new AppError(404, 'Some of those rows are no longer on the sheet. Refresh and try again.')
   }
+  const byId = new Map(found.map((row) => [String(row._id), row]))
+  const rows = input.rowIds.map((id) => byId.get(id.toLowerCase()) as TripDoLineDocument)
   for (const row of rows) {
     refuseBilled(row, 'given another Trip DO')
   }
 
+  const total = rows.reduce((sum, row) => sum + row.qty, 0)
+  const qty = input.qty ?? total
+  if (qty > total) {
+    throw new AppError(400, `The ticked rows carry ${total}, so they cannot link ${qty}.`)
+  }
+  const shares = planBulkLink(
+    rows.map((row) => row.qty),
+    qty,
+  )
+  const moving = rows
+    .map((row, index) => ({ row, linkQty: shares[index] }))
+    .filter(({ linkQty }) => linkQty > 0)
+
   const gatePass = await findLinkableGatePass(input.gatePassId)
   const allocated = await allocatedByModel(
     gatePass._id,
-    rows.map((row) => row._id),
+    moving.map(({ row }) => row._id),
   )
+  // The part a split leaves behind keeps the row's old Trip DO, so when that
+  // was this gate pass it still uses the line up.
+  for (const { row, linkQty } of moving) {
+    const left = row.qty - linkQty
+    if (left > 0 && countsTowardGatePassQty(row.kind) && String(row.link?.gatePassId) === String(gatePass._id)) {
+      const key = rowLineKey(row)
+      allocated.set(key, (allocated.get(key) ?? 0) + left)
+    }
+  }
 
   const lineFor = new Map<string, GatePassLine>()
   const wanted = new Map<string, { qty: number; line: GatePassLine }>()
-  for (const row of rows) {
+  for (const { row, linkQty } of moving) {
     const line = resolveLine(gatePass, row, input.lineKey)
     lineFor.set(String(row._id), line)
 
     if (!countsTowardGatePassQty(row.kind)) {
-      if (row.qty > line.qty) {
-        refuseOversizedReturn(gatePass, row, line, row.qty)
+      if (linkQty > line.qty) {
+        refuseOversizedReturn(gatePass, row, line, linkQty)
       }
       continue
     }
     const entry = wanted.get(line.modelKey) ?? { qty: 0, line }
-    entry.qty += row.qty
+    entry.qty += linkQty
     wanted.set(line.modelKey, entry)
   }
 
@@ -817,32 +853,46 @@ export async function bulkLinkRows(
     }
   }
 
+  // At most one row is split — the one the pieces ran out on — and its
+  // remainder is written first, as `linkRow` writes it.
+  for (const { row, linkQty } of moving) {
+    if (linkQty < row.qty) {
+      await TripDoLineModel.create(
+        partOf(row, row.qty - linkQty, await nextSplitIndex(row.sourceKey), row.link ?? null),
+      )
+    }
+  }
+
   await TripDoLineModel.bulkWrite(
-    rows.map((row) => {
+    moving.map(({ row, linkQty }) => {
       const line = lineFor.get(String(row._id)) as GatePassLine
       return {
         updateOne: {
           filter: { _id: row._id },
           update: {
-            $set: { link: linkCopyFor(gatePass, line, actor), tripDoKey: comparisonKey(gatePass.tripDo) },
+            $set: {
+              qty: linkQty,
+              link: linkCopyFor(gatePass, line, actor),
+              tripDoKey: comparisonKey(gatePass.tripDo),
+            },
           },
         },
       }
     }),
   )
   await refreshBillingStatus({
-    gatePassIds: [gatePass._id, ...rows.map((row) => row.link?.gatePassId)],
+    gatePassIds: [gatePass._id, ...moving.map(({ row }) => row.link?.gatePassId)],
   })
-  await syncLabourBillCopies(rows.map((row) => row._id))
+  await syncLabourBillCopies(moving.map(({ row }) => row._id))
 
   return {
     gatePassNumber: gatePass.gatePassId,
     tripDo: gatePass.tripDo,
     csd: gatePass.csd,
     unit: gatePass.unit,
-    qty: rows.reduce((sum, row) => sum + row.qty, 0),
-    remainderQty: 0,
-    rows: rows.length,
+    qty,
+    remainderQty: total - qty,
+    rows: moving.length,
   }
 }
 

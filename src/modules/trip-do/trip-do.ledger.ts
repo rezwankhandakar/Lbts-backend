@@ -206,6 +206,25 @@ export function ledgerSourcesFor(
   return sources
 }
 
+/**
+ * How a bulk link of `qty` pieces falls across the ticked rows, in the order
+ * they are listed: each row is taken whole while the pieces last, the row they
+ * run out on is split, and any after it are left as they were. Twenty-six
+ * ticked against a gate pass with room for twenty-five is one piece split off
+ * the last row — the split the operator would otherwise make by hand first.
+ *
+ * Returns the pieces each row links, position for position. Mirrored by
+ * `bulkLinkShares` in the frontend's `split-parts.ts`; change one, change both.
+ */
+export function planBulkLink(rowQtys: readonly number[], qty: number): number[] {
+  let left = Math.max(0, qty)
+  return rowQtys.map((rowQty) => {
+    const take = Math.max(0, Math.min(rowQty, left))
+    left -= take
+    return take
+  })
+}
+
 /** A stored row, reduced to what reconciliation reads. */
 export interface LedgerRowState {
   id: string

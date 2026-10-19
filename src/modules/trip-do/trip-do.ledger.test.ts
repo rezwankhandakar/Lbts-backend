@@ -6,7 +6,7 @@ import {
   orderRowStatusFor,
   rowAmountFor,
 } from './trip-do.constants'
-import { ledgerSourcesFor, reconcileRows } from './trip-do.ledger'
+import { ledgerSourcesFor, planBulkLink, reconcileRows } from './trip-do.ledger'
 import type { LedgerRowState, LedgerTrip } from './trip-do.ledger'
 
 /**
@@ -270,5 +270,29 @@ describe('first delivery on an order line', () => {
   it('waits for the trip to complete', () => {
     const [order] = ledgerSourcesFor('c1', [{ ...FRIDGE, qty: 4 }], [trip('1', [{ qty: 4 }])])
     assert.equal(order.firstDeliveredQty, 0)
+  })
+})
+
+describe('a bulk link of fewer pieces than were ticked', () => {
+  it('takes every row whole when the pieces cover them', () => {
+    assert.deepEqual(planBulkLink([6, 10, 10], 26), [6, 10, 10])
+  })
+
+  it('splits the row the pieces run out on, in the order listed', () => {
+    assert.deepEqual(planBulkLink([10, 10, 6], 25), [10, 10, 5])
+  })
+
+  it('leaves rows after that one as they were', () => {
+    assert.deepEqual(planBulkLink([6, 10, 10], 8), [6, 2, 0])
+    assert.deepEqual(planBulkLink([6, 10, 10], 6), [6, 0, 0])
+  })
+
+  it('never links more than a row carries, however many are asked for', () => {
+    assert.deepEqual(planBulkLink([3, 4], 99), [3, 4])
+  })
+
+  it('links nothing for nothing', () => {
+    assert.deepEqual(planBulkLink([3, 4], 0), [0, 0])
+    assert.deepEqual(planBulkLink([3, 4], -2), [0, 0])
   })
 })

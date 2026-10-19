@@ -111,7 +111,10 @@ export async function postBulkLink(req: Request, res: Response): Promise<void> {
 
   sendResponse(res, {
     statusCode: 200,
-    message: `Trip DO ${result.tripDo} set on ${result.rows} rows.`,
+    message:
+      result.remainderQty > 0
+        ? `Trip DO ${result.tripDo} set on ${result.qty} across ${result.rows} rows; ${result.remainderQty} left for another Trip DO.`
+        : `Trip DO ${result.tripDo} set on ${result.rows} rows.`,
     data: result,
   })
 }
