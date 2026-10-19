@@ -124,19 +124,21 @@ export const updateLabourBillLineSchema = z
 export type UpdateLabourBillLineInput = z.infer<typeof updateLabourBillLineSchema>
 
 /**
- * Which signed copies to assemble: the whole bill, or one CSD section of it.
+ * Which signed copies to assemble: the whole bill, or one section of it.
  *
- * The value is a section **key** — `comparisonKey` of the CSD, and the empty
- * string for the pending section — because that is what the sheet groups by,
- * and a raw CSD would leave the server guessing which spelling was meant. It
- * is deliberately allowed to be empty: a section of rows whose Trip DO is
- * unset still has paper behind it.
+ * The value is a section **key** — `labourSectionKey(unit, csd)`, `WFR.CSD02`,
+ * and the empty string for the pending section — because that is what the
+ * sheet groups by, and a raw CSD would leave the server guessing which unit and
+ * which spelling were meant. It is still called `csd` on the wire, which is
+ * what it named before the units were split apart. It is deliberately allowed
+ * to be empty: a section of rows whose Trip DO is unset still has paper behind
+ * it.
  */
 export const signedCopiesQuerySchema = z.object({
   csd: z
     .string()
-    .max(40, 'That is not a CSD section.')
-    .regex(/^[A-Z0-9]*$/, 'That is not a CSD section.')
+    .max(64, 'That is not a CSD section.')
+    .regex(/^(?:[A-Z0-9]*\.[A-Z0-9]+)?$/, 'That is not a CSD section.')
     .optional(),
 })
 export type SignedCopiesQuery = z.infer<typeof signedCopiesQuerySchema>

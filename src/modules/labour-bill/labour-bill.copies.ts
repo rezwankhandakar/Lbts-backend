@@ -60,9 +60,9 @@ export interface LabourSignedCopyChallan {
   trips: number
 }
 
-/** One CSD's section, which is one bill the office sends. */
+/** One unit's CSD section, which is one bill the office sends. */
 export interface LabourSignedCopySection {
-  /** `comparisonKey` of the CSD, and `''` for the pending section. */
+  /** `labourSectionKey(unit, csd)`, and `''` for the pending section. */
   key: string
   label: string
   isPending: boolean
@@ -252,7 +252,7 @@ export async function buildLabourBillSignedCopiesPdf(
     csdKey === undefined ? detail.groups : detail.groups.filter((group) => group.key === csdKey)
 
   if (csdKey !== undefined && groups.length === 0) {
-    throw new AppError(404, `${bill.billNumber} has no section for that CSD.`)
+    throw new AppError(404, `${bill.billNumber} has no section for that unit and CSD.`)
   }
 
   const challanIds = [

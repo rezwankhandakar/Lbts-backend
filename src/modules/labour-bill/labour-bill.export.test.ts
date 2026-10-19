@@ -7,6 +7,7 @@ import {
   buildLabourBillWorkbook,
   labourBillExportFilename,
 } from './labour-bill.export'
+import { labourSectionKey, labourSectionLabel } from './labour-bill.constants'
 import { labourGroupTotals } from './labour-bill.serializer'
 import type {
   LabourBillLineRecord,
@@ -85,11 +86,13 @@ const LINES = [
   line({ sl: 2, slRowSpan: 0, challanId: 'c2', labourAmount: 500, floorAmount: 300, total: 800 }),
 ]
 
-function group(csd: string, lines: LabourBillLineRecord[]): LabourCsdGroupRecord {
+function group(csd: string, lines: LabourBillLineRecord[], unit = csd ? 'WFR' : ''): LabourCsdGroupRecord {
   return {
+    unit,
+    unitKey: unit,
     csd,
-    key: csd.replace(/[^A-Z0-9]/gi, '').toUpperCase(),
-    label: csd || 'Trip DO pending',
+    key: labourSectionKey(unit, csd),
+    label: labourSectionLabel(unit, csd),
     isPending: csd === '',
     totals: labourGroupTotals(lines),
     lines,
@@ -119,7 +122,7 @@ describe('buildLabourBillWorkbook', () => {
     const sheet = await load(await buildLabourBillWorkbook(BILL, GROUPS))
     assert.equal(
       sheet.getCell(1, 1).value,
-      'Line Business Transport service — Walton Labour Bill — CSD-02 — Walton Hi-Tech Industries — September 2026',
+      'Line Business Transport service — Walton Labour Bill — Unit WFR — CSD-02 — Walton Hi-Tech Industries — September 2026',
     )
     assert.equal(HEADER_ROW, 2)
   })
@@ -179,18 +182,20 @@ describe('buildLabourBillWorkbook', () => {
     assert.equal(sheet.getCell(total, 11).value, null)
   })
 
-  // Each CSD is billed on its own, so each gets its own worksheet — the month
-  // is only what holds them together in one file.
-  it('writes one worksheet per CSD, in the sheet order, pending last', async () => {
+  // Each unit's CSD is billed on its own, so each gets its own worksheet — the
+  // month is only what holds them together in one file.
+  it('writes one worksheet per unit and CSD, in the sheet order, pending last', async () => {
     const bytes = await buildLabourBillWorkbook(BILL, [
+      group('CSD-04', [line({ sl: 1, slRowSpan: 1, csd: 'CSD-04', unit: 'WAC' })], 'WAC'),
       group('CSD-01', [line({ sl: 1, slRowSpan: 1, csd: 'CSD-01' })]),
-      group('CSD-02', LINES),
-      group('', [line({ sl: 1, slRowSpan: 1, csd: '', tripDo: '' })]),
+      group('CSD-04', LINES),
+      group('', [line({ sl: 1, slRowSpan: 1, csd: '', unit: '', tripDo: '' })]),
     ])
 
     assert.deepEqual(await sheetNames(bytes), [
-      'CSD-01 Sep 2026',
-      'CSD-02 Sep 2026',
+      'WAC · CSD-04 Sep 2026',
+      'WFR · CSD-01 Sep 2026',
+      'WFR · CSD-04 Sep 2026',
       'Trip DO pending Sep 2026',
     ])
   })
@@ -240,13 +245,13 @@ describe('buildLabourBillWorkbook', () => {
     const sheet = await load(await buildLabourBillWorkbook({ ...BILL, company: '' }, GROUPS))
     assert.equal(
       sheet.getCell(1, 1).value,
-      'Line Business Transport service — Walton Labour Bill — CSD-02 — September 2026',
+      'Line Business Transport service — Walton Labour Bill — Unit WFR — CSD-02 — September 2026',
     )
   })
 })
 
 describe('labourBillExportFilename', () => {
-  it('names the bill and its month; the CSDs are the worksheets inside it', () => {
+  it('names the bill and its month; the sections are the worksheets inside it', () => {
     assert.equal(labourBillExportFilename(BILL), 'LBTS-WLB-2026-0003_labour_2026-09.xlsx')
   })
 })

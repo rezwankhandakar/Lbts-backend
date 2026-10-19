@@ -165,7 +165,7 @@ export function toLabourBillLineRecord(
   }
 }
 
-/** What one CSD's section of the month comes to — the figures its own bill carries. */
+/** What one section of the month comes to — the figures its own bill carries. */
 export interface LabourGroupTotals {
   rows: number
   challans: number
@@ -178,14 +178,19 @@ export interface LabourGroupTotals {
 }
 
 /**
- * One CSD's worth of the month: its own SL series, its own total, and its own
+ * One unit's CSD for the month: its own SL series, its own total, and its own
  * worksheet in the export. The pending section is the same shape, holding the
  * rows nothing has matched to a gate pass yet.
  */
 export interface LabourCsdGroupRecord {
+  /** WFR, WAC — the tab the section sits on. Blank on the pending section. */
+  unit: string
+  /** `comparisonKey` of the unit. */
+  unitKey: string
   csd: string
+  /** `labourSectionKey(unit, csd)`, and `''` for the pending section. */
   key: string
-  /** The CSD, or "Trip DO pending". */
+  /** "WFR · CSD-02", or "Trip DO pending". */
   label: string
   isPending: boolean
   totals: LabourGroupTotals
@@ -194,7 +199,7 @@ export interface LabourCsdGroupRecord {
 
 export interface LabourBillDetail {
   bill: LabourBillRecord
-  /** The month split by CSD, in CSD order with pending last. */
+  /** The month split by unit and CSD, in that order with pending last. */
   groups: LabourCsdGroupRecord[]
   /** Rows whose sheet row has changed, and rows whose sheet row is gone. */
   drift: { changed: number; missing: number }
@@ -228,8 +233,12 @@ export interface LabourScanResult {
   added: string[]
   /** Models this challan carries that were already on the bill. */
   skipped: string[]
-  /** The CSDs this scan filed rows under, so the toast can say where they went. */
-  csds: string[]
+  /**
+   * The section keys this scan filed new rows under, in the sheet's order and
+   * `''` for the pending section — so the toast can say where they went and the
+   * page can open the unit's tab they landed on.
+   */
+  sections: string[]
   /** Models with no Trip DO yet, which land in the pending section and wait there. */
   withoutTripDo: string[]
   detail: LabourBillDetail

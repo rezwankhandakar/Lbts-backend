@@ -6,12 +6,14 @@ import { LABOUR_BILL_STATUSES } from './labour-bill.constants'
  * A Walton Labour Bill: a billing month, and the challan product lines whose
  * handling it charges for.
  *
- * **A month is the whole of the slot.** The office bills each CSD separately,
- * but the CSD is a fact about a row's gate pass rather than something to ask an
- * operator to restate — so the sheet splits itself into one section, one SL
- * series and one worksheet per CSD (`groupLabourLinesByCsd`), and a challan that
- * went out on two gate passes files its lines into two sections off a single
- * scan. Nothing about the CSD is stored here; it is read off each row's copy.
+ * **A month is the whole of the slot.** The office bills each unit's CSD
+ * separately, but the unit and the CSD are facts about a row's gate pass rather
+ * than something to ask an operator to restate — so the sheet splits itself
+ * into one section, one SL series and one worksheet per unit and CSD
+ * (`groupLabourLinesByUnitAndCsd`), with the units as tabs on screen, and a
+ * challan that went out on two gate passes files its lines into two sections
+ * off a single scan. Nothing about either is stored here; both are read off
+ * each row's copy.
  *
  * The totals are stored, derived from the lines by `refreshLabourBillTotals`
  * after every change and never incremented, so the list can show and sum them
@@ -105,7 +107,10 @@ const labourBillLineSchema = new Schema(
     tripDo: { type: String, default: '' },
     tripDate: { type: Date, default: null },
     csd: { type: String, default: '' },
-    /** The gate pass's own unit, kept so a refreshed row can still seed the company. */
+    /**
+     * The gate pass's own unit (WFR, WAC): the tab and the section the row is
+     * filed under, and what seeds the company when the slot names none.
+     */
     unit: { type: String, default: '' },
     gatePassNumber: { type: String, default: '' },
 

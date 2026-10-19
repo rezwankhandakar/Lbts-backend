@@ -4,7 +4,12 @@ import { findByScan } from '../delivery/delivery.lookups'
 import { TripDoLineModel } from '../trip-do/trip-do.model'
 import type { TripDoLineDocument } from '../trip-do/trip-do.model'
 import type { UserDocument } from '../user/user.model'
-import { MAX_LABOUR_BILL_LINES, arrangeLabourLines } from './labour-bill.constants'
+import {
+  MAX_LABOUR_BILL_LINES,
+  arrangeLabourLines,
+  compareLabourSectionKeys,
+  labourSectionKey,
+} from './labour-bill.constants'
 import { labourCopyHashOf, labourCopyOf } from './labour-bill.copy'
 import { LabourBillLineModel, LabourBillModel } from './labour-bill.model'
 import type { LabourBillLineDocument } from './labour-bill.model'
@@ -119,14 +124,17 @@ export async function scanChallanOntoLabourBill(
   }
 
   /**
-   * **Every model comes on, whatever CSD it went out under.** The slot is a
-   * month, and each row files itself into the section for its own gate pass's
-   * CSD — so a challan that went out on two gate passes lands in two sections
-   * off one scan, which is what the paper in the operator's hand actually is.
+   * **Every model comes on, whatever unit and CSD it went out under.** The slot
+   * is a month, and each row files itself into the section for its own gate
+   * pass's unit and CSD — a WFR challan onto the WFR tab, a WAC one onto the
+   * WAC tab — so a challan that went out on two gate passes lands in two
+   * sections off one scan, which is what the paper in the operator's hand
+   * actually is.
    *
-   * A line whose Trip DO is not set yet has no CSD, and it comes on too: it
-   * waits in the pending section, keeping whatever amounts are typed into it,
-   * and moves into its CSD the moment somebody links the gate pass.
+   * A line whose Trip DO is not set yet has no unit or CSD, and it comes on
+   * too: it waits in the pending section, keeping whatever amounts are typed
+   * into it, and moves onto its unit's tab the moment somebody links the gate
+   * pass.
    */
   const existing = await LabourBillLineModel.find({
     billId: bill._id,
@@ -137,13 +145,11 @@ export async function scanChallanOntoLabourBill(
   const fresh = rows.filter((row) => !already.has(String(row._id)))
   const skipped = rows.filter((row) => already.has(String(row._id))).map(labelOf)
   const withoutTripDo = fresh.filter((row) => !row.link).map(labelOf)
-  const csds = [
-    ...new Set(
-      fresh
-        .map((row) => row.link?.csd.trim())
-        .filter((value): value is string => Boolean(value)),
-    ),
-  ].sort()
+  // The key the sheet files each new row under, worked out the way the sheet
+  // works it out — so the page opens exactly the tab the grouping put it on.
+  const sections = [
+    ...new Set(fresh.map((row) => labourSectionKey(row.link?.unit ?? '', row.link?.csd ?? ''))),
+  ].sort(compareLabourSectionKeys)
 
   if (fresh.length > 0) {
     if (bill.lineCount + fresh.length > MAX_LABOUR_BILL_LINES) {
@@ -201,7 +207,7 @@ export async function scanChallanOntoLabourBill(
     customerName: challan.customerName ?? '',
     added: fresh.map(labelOf),
     skipped,
-    csds,
+    sections,
     withoutTripDo,
     detail: await buildLabourBillDetail(current),
   }
@@ -308,8 +314,9 @@ export async function removeLabourBillLines(
  * whatever the sheet says at the time, and a challan is routinely scanned in
  * before anybody has matched its gate pass — so the row sits in the pending
  * section with no CSD. The moment somebody sets its Trip DO, the Trip DO module
- * calls this, the copy learns the CSD, and the row is drawn under that CSD's
- * section the next time the bill is opened. Nobody presses anything.
+ * calls this, the copy learns the unit and the CSD, and the row is drawn on that
+ * unit's tab, under that CSD, the next time the bill is opened. Nobody presses
+ * anything.
  *
  * Called from the Trip DO module the way `refreshBillingStatus` is, and with
  * the same posture: **it never throws.** A row one write behind is a section

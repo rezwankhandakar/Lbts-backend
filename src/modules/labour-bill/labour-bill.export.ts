@@ -107,17 +107,21 @@ function sheetName(group: LabourCsdGroupRecord, bill: LabourBillRecord): string 
 }
 
 /**
- * "Line Business Transport service — Walton Labour Bill — CSD-02 — September 2026".
+ * "Line Business Transport service — Walton Labour Bill — Unit WFR — CSD-02 —
+ * September 2026".
  *
- * The CSD is in the title because each worksheet **is** that CSD's bill: the
- * office sends them separately, so a sheet naming only the month would be one
- * of several nobody could tell apart once they were printed.
+ * The unit and the CSD are in the title because each worksheet **is** that
+ * unit's bill for that CSD: the office sends them separately, so a sheet naming
+ * only the month would be one of several nobody could tell apart once they were
+ * printed. "Unit WFR" is the Excel Bill's own wording for the same thing.
  */
 export function labourBillTitle(
-  group: Pick<LabourCsdGroupRecord, 'label'>,
+  group: Pick<LabourCsdGroupRecord, 'label' | 'unit' | 'csd' | 'isPending'>,
   bill: Pick<LabourBillRecord, 'company' | 'periodLabel'>,
 ): string {
-  const parts = ['Line Business Transport service', 'Walton Labour Bill', group.label]
+  const section =
+    group.isPending || !group.unit ? [group.label] : [`Unit ${group.unit}`, group.csd]
+  const parts = ['Line Business Transport service', 'Walton Labour Bill', ...section]
   if (bill.company.trim()) {
     parts.push(bill.company.trim())
   }
@@ -126,8 +130,8 @@ export function labourBillTitle(
 }
 
 /**
- * One CSD's worksheet: the office's own sheet for that CSD, with its own title,
- * its own SL series starting at 1 and its own totals at the foot.
+ * One section's worksheet: the office's own sheet for that unit's CSD, with its
+ * own title, its own SL series starting at 1 and its own totals at the foot.
  */
 function writeGroupSheet(
   workbook: Workbook,
@@ -248,12 +252,13 @@ function writeGroupSheet(
 }
 
 /**
- * The month as a workbook: **one worksheet per CSD**, in the sheet's own order
- * with the pending section last.
+ * The month as a workbook: **one worksheet per unit and CSD**, in the sheet's
+ * own order — every WFR sheet, then every WAC one — with the pending section
+ * last.
  *
  * Separate sheets rather than one long list with headings in it, because that
- * is what the office sends — each CSD is billed on its own — and a workbook
- * splits the same way a printer does. The month is what holds them together, so
+ * is what the office sends — each unit's CSD is billed on its own — and a
+ * workbook splits the same way a printer does. The month is what holds them together, so
  * a bill nobody has scanned into still produces a file with the empty sheet in
  * it rather than a workbook with no sheets at all, which Excel refuses to open.
  */
@@ -275,6 +280,8 @@ export async function buildLabourBillWorkbook(
       ? groups
       : [
           {
+            unit: '',
+            unitKey: '',
             csd: '',
             key: '',
             label: 'Labour',
@@ -291,7 +298,7 @@ export async function buildLabourBillWorkbook(
   return new Uint8Array(await workbook.xlsx.writeBuffer())
 }
 
-/** `LBTS-WLB-2026-0007_2026-09.xlsx` — one file, one worksheet per CSD inside it. */
+/** `LBTS-WLB-2026-0007_2026-09.xlsx` — one file, one worksheet per unit and CSD inside it. */
 export function labourBillExportFilename(
   bill: Pick<LabourBillRecord, 'billNumber' | 'month' | 'year'>,
 ): string {

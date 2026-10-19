@@ -136,19 +136,25 @@ export function arrangeLabourLines<T extends ArrangeableLabourLine>(
   })
 }
 
-// --- Splitting the month by CSD ----------------------------------------------------
+// --- Splitting the month by unit and CSD -------------------------------------------
 
 export interface GroupableLabourLine extends ArrangeableLabourLine {
+  /** The unit the row's gate pass carries (WFR, WAC), blank while its Trip DO is unset. */
+  unit: string
   /** The CSD the row's gate pass carries, blank while its Trip DO is unset. */
   csd: string
 }
 
 export interface LabourCsdGroup<T> {
+  /** The unit as the gate passes write it; blank on the pending section. */
+  unit: string
+  /** `comparisonKey` of the unit — the tab the section sits on. */
+  unitKey: string
   /** The CSD as the gate passes write it; blank is the pending section. */
   csd: string
-  /** `comparisonKey` of it, so `CSD-01` and `csd 01` are one section. */
+  /** `labourSectionKey` of the pair, and `''` for the pending section. */
   key: string
-  /** What the section is called: the CSD, or "Trip DO pending". */
+  /** What the section is called: "WFR · CSD-02", or "Trip DO pending". */
   label: string
   /** True for the section holding rows nothing has matched yet. */
   isPending: boolean
@@ -156,60 +162,91 @@ export interface LabourCsdGroup<T> {
 }
 
 /**
- * **The bill splits itself by CSD.** Nobody chooses one: a slot is a month, a
- * challan is scanned in whole, and each of its rows files itself under whatever
- * CSD the gate pass behind it carries. One CSD is one section, one SL series and
- * one worksheet in the export — the separate bills the office sends — while the
- * month above them stays a single thing to scan into.
+ * The key one section of the sheet goes by: the unit and the CSD, each through
+ * `comparisonKey`, so `CSD-01` and `csd 01` are one section rather than two that
+ * look identical on screen.
  *
- * That is the whole reason the CSD is not a field on the slot. A row's CSD is a
- * fact about its gate pass, and a fact is not something to ask an operator to
- * restate; asking would also make a challan that went out on two gate passes
+ * **A row with no CSD is pending whatever unit it names**, and its key is `''`
+ * — the one value no matched pair can produce, since `comparisonKey` never
+ * returns a dot. The pending section is "nobody has set the Trip DO", which is a
+ * single job however the rows behind it are split.
+ */
+export function labourSectionKey(unit: string, csd: string): string {
+  const csdKey = comparisonKey(csd.trim())
+  return csdKey === '' ? '' : `${comparisonKey(unit.trim())}.${csdKey}`
+}
+
+/**
+ * **The bill splits itself by unit, and each unit by CSD.** Nobody chooses
+ * either: a slot is a month, a challan is scanned in whole, and each of its rows
+ * files itself under whatever unit and CSD the gate pass behind it carries. One
+ * unit and CSD is one section, one SL series and one worksheet in the export —
+ * the separate bills the office sends — while the month above them stays a
+ * single thing to scan into. On screen the units are tabs, so a WFR challan and
+ * a WAC challan scanned one after the other land on two different tabs.
+ *
+ * The unit is part of the section rather than a filter over it because one CSD
+ * routinely takes goods from several units — CSD-04 has had WFR, WAC, NVH and
+ * HAP gate passes — and WFR's handling is billed to WFR, never folded in with
+ * WAC's under one CSD heading.
+ *
+ * That is the whole reason neither is a field on the slot. A row's unit and CSD
+ * are facts about its gate pass, and a fact is not something to ask an operator
+ * to restate; asking would also make a challan that went out on two gate passes
  * into two scans against two slots, which is not how the paper arrives.
  *
  * **A row with no Trip DO has no CSD, and waits rather than being refused.**
  * Matching a gate pass happens on its own schedule, so those rows sit in a
  * pending section at the foot, keeping the amounts already typed into them, and
- * move into their CSD the moment the Trip DO is set — see `syncLabourBillCopies`.
+ * move into their unit and CSD the moment the Trip DO is set — see
+ * `syncLabourBillCopies`.
  *
- * Sections are ordered by CSD so the sheet reads the same every time it is
- * opened, with pending always last; within a section the challans keep the
- * order they were scanned in and the SL restarts at 1.
+ * Sections are ordered by unit and then by CSD so the sheet reads the same every
+ * time it is opened, with pending always last; within a section the challans
+ * keep the order they were scanned in and the SL restarts at 1.
  */
-export function groupLabourLinesByCsd<T extends GroupableLabourLine>(
+export function groupLabourLinesByUnitAndCsd<T extends GroupableLabourLine>(
   lines: readonly T[],
 ): LabourCsdGroup<T>[] {
-  const buckets = new Map<string, { csd: string; lines: T[] }>()
+  const buckets = new Map<string, { unit: string; csd: string; lines: T[] }>()
 
   for (const line of lines) {
-    const csd = line.csd.trim()
-    // The same normalisation every transcribed identifier gets, so `CSD-01` and
-    // `csd 01` are one section rather than two that look identical on screen.
-    const key = comparisonKey(csd)
+    const key = labourSectionKey(line.unit, line.csd)
     let bucket = buckets.get(key)
     if (!bucket) {
-      bucket = { csd, lines: [] }
+      bucket = key === '' ? { unit: '', csd: '', lines: [] } : { unit: line.unit.trim(), csd: line.csd.trim(), lines: [] }
       buckets.set(key, bucket)
     }
     bucket.lines.push(line)
   }
 
   return [...buckets.entries()]
-    .sort(([a], [b]) => {
-      // Pending last, whatever it sorts as: it is the section somebody has work
-      // left in, and it belongs at the foot rather than at the top of the file.
-      if (a === '' || b === '') {
-        return a === '' ? 1 : -1
-      }
-      return a.localeCompare(b)
-    })
+    .sort(([a], [b]) => compareLabourSectionKeys(a, b))
     .map(([key, bucket]) => ({
+      unit: bucket.unit,
+      unitKey: comparisonKey(bucket.unit),
       csd: bucket.csd,
       key,
-      label: labourGroupLabel(bucket.csd),
+      label: labourSectionLabel(bucket.unit, bucket.csd),
       isPending: key === '',
       lines: arrangeLabourLines(bucket.lines),
     }))
+}
+
+/**
+ * The sheet's section order: by unit, then by CSD, and pending last whatever it
+ * sorts as — it is the section somebody has work left in, and it belongs at the
+ * foot rather than at the top of the file.
+ */
+export function compareLabourSectionKeys(a: string, b: string): number {
+  if (a === '' || b === '') {
+    return a === b ? 0 : a === '' ? 1 : -1
+  }
+  // Part by part rather than as one string, so `WFR` cannot interleave with a
+  // unit it happens to be a prefix of.
+  const [unitA = '', csdA = ''] = a.split('.')
+  const [unitB = '', csdB = ''] = b.split('.')
+  return unitA.localeCompare(unitB) || csdA.localeCompare(csdB)
 }
 
 // --- Numbering and periods --------------------------------------------------------
@@ -234,9 +271,26 @@ export function labourBillPeriodLabel(month: number, year: number): string {
   return `${MONTH_NAMES[month - 1] ?? 'Month'} ${year}`
 }
 
-/** What a CSD section is called on screen and on its own worksheet. */
-export function labourGroupLabel(csd: string): string {
-  return csd || PENDING_CSD_LABEL
+/**
+ * What a section is called on screen and on its own worksheet: "WFR · CSD-02",
+ * or "Trip DO pending". The CSD alone where the gate pass named no unit, which
+ * the gate pass schema does not allow but a row copied before it did may carry.
+ */
+export function labourSectionLabel(unit: string, csd: string): string {
+  const trimmedCsd = csd.trim()
+  if (!trimmedCsd) {
+    return PENDING_CSD_LABEL
+  }
+  const trimmedUnit = unit.trim()
+  return trimmedUnit ? `${trimmedUnit} · ${trimmedCsd}` : trimmedCsd
+}
+
+/**
+ * What a CSD is called where the units are added together — the Accounts
+ * receivable, which still settles a month CSD by CSD.
+ */
+export function labourCsdLabel(csd: string): string {
+  return csd.trim() || PENDING_CSD_LABEL
 }
 
 /**

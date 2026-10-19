@@ -2,9 +2,12 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 import {
   arrangeLabourLines,
+  compareLabourSectionKeys,
   formatLabourBillNumber,
-  groupLabourLinesByCsd,
+  groupLabourLinesByUnitAndCsd,
   isUnpricedLabourLine,
+  labourSectionKey,
+  labourSectionLabel,
   lineTotal,
   shortLabourBillNumber,
 } from './labour-bill.constants'
@@ -90,21 +93,26 @@ describe('arrangeLabourLines', () => {
   })
 })
 
-describe('groupLabourLinesByCsd', () => {
-  const line = (csd: string, challanId: string, seq: number) => ({ csd, challanId, seq })
+describe('groupLabourLinesByUnitAndCsd', () => {
+  const line = (unit: string, csd: string, challanId: string, seq: number) => ({
+    unit,
+    csd,
+    challanId,
+    seq,
+  })
 
-  it('splits the month into one section per CSD, each with its own SL series', () => {
-    const groups = groupLabourLinesByCsd([
-      line('CSD-02', 'c1', 1),
-      line('CSD-01', 'c1', 2),
-      line('CSD-02', 'c2', 3),
+  it('splits the month into one section per unit and CSD, each with its own SL series', () => {
+    const groups = groupLabourLinesByUnitAndCsd([
+      line('WFR', 'CSD-02', 'c1', 1),
+      line('WFR', 'CSD-01', 'c1', 2),
+      line('WFR', 'CSD-02', 'c2', 3),
     ])
 
     assert.deepEqual(
       groups.map((group) => [group.label, group.lines.map((row) => [row.challanId, row.sl])]),
       [
-        ['CSD-01', [['c1', 1]]],
-        ['CSD-02', [
+        ['WFR · CSD-01', [['c1', 1]]],
+        ['WFR · CSD-02', [
           ['c1', 1],
           ['c2', 2],
         ]],
@@ -112,34 +120,96 @@ describe('groupLabourLinesByCsd', () => {
     )
   })
 
-  // One scan, two sections: this is the case that makes the CSD a property of
-  // the row rather than of the slot.
+  // The reason the unit is part of the section: one CSD takes goods from
+  // several units, and WFR's handling is never billed under WAC's heading.
+  it('keeps two units apart inside one CSD, each on its own SL series', () => {
+    const groups = groupLabourLinesByUnitAndCsd([
+      line('WFR', 'CSD-04', 'c1', 1),
+      line('WAC', 'CSD-04', 'c2', 2),
+      line('WFR', 'CSD-04', 'c3', 3),
+    ])
+
+    assert.deepEqual(
+      groups.map((group) => [group.unitKey, group.key, group.lines.map((row) => [row.challanId, row.sl])]),
+      [
+        ['WAC', 'WAC.CSD04', [['c2', 1]]],
+        ['WFR', 'WFR.CSD04', [
+          ['c1', 1],
+          ['c3', 2],
+        ]],
+      ],
+    )
+  })
+
+  // One scan, two sections: this is the case that makes the unit and the CSD
+  // properties of the row rather than of the slot.
   it('files one challan into two sections when it went out on two gate passes', () => {
-    const groups = groupLabourLinesByCsd([line('CSD-01', 'c1', 1), line('CSD-04', 'c1', 2)])
-    assert.deepEqual(groups.map((group) => group.label), ['CSD-01', 'CSD-04'])
+    const groups = groupLabourLinesByUnitAndCsd([
+      line('WFR', 'CSD-01', 'c1', 1),
+      line('WAC', 'CSD-04', 'c1', 2),
+    ])
+    assert.deepEqual(groups.map((group) => group.label), ['WAC · CSD-04', 'WFR · CSD-01'])
     assert.equal(groups[0]?.lines.length, 1)
     assert.equal(groups[1]?.lines.length, 1)
   })
 
-  it('keeps rows with no CSD in a pending section, always last', () => {
-    const groups = groupLabourLinesByCsd([
-      line('', 'c1', 1),
-      line('CSD-07', 'c2', 2),
-      line('CSD-01', 'c3', 3),
+  it('orders by unit, then by CSD, with rows that have no CSD pending and last', () => {
+    const groups = groupLabourLinesByUnitAndCsd([
+      line('', '', 'c1', 1),
+      line('WFR', 'CSD-07', 'c2', 2),
+      line('WFR', 'CSD-01', 'c3', 3),
+      line('WAC', 'CSD-07', 'c4', 4),
     ])
 
-    assert.deepEqual(groups.map((group) => group.label), ['CSD-01', 'CSD-07', 'Trip DO pending'])
-    assert.deepEqual(groups.map((group) => group.isPending), [false, false, true])
+    assert.deepEqual(groups.map((group) => group.label), [
+      'WAC · CSD-07',
+      'WFR · CSD-01',
+      'WFR · CSD-07',
+      'Trip DO pending',
+    ])
+    assert.deepEqual(groups.map((group) => group.isPending), [false, false, false, true])
   })
 
-  it('reads two spellings of one CSD as one section', () => {
-    const groups = groupLabourLinesByCsd([line('CSD-01', 'c1', 1), line('csd 01', 'c2', 2)])
+  // "Nobody has set the Trip DO" is one job, however the rows behind it split.
+  it('puts every row with no CSD in the one pending section, whatever unit it names', () => {
+    const groups = groupLabourLinesByUnitAndCsd([line('WFR', '', 'c1', 1), line('', '', 'c2', 2)])
+    assert.equal(groups.length, 1)
+    assert.equal(groups[0]?.key, '')
+    assert.equal(groups[0]?.unit, '')
+  })
+
+  it('reads two spellings of one unit and CSD as one section', () => {
+    const groups = groupLabourLinesByUnitAndCsd([
+      line('WFR', 'CSD-01', 'c1', 1),
+      line('wfr', 'csd 01', 'c2', 2),
+    ])
     assert.equal(groups.length, 1)
     assert.equal(groups[0]?.lines.length, 2)
   })
 
   it('is empty for an empty sheet', () => {
-    assert.deepEqual(groupLabourLinesByCsd([]), [])
+    assert.deepEqual(groupLabourLinesByUnitAndCsd([]), [])
+  })
+})
+
+describe('labour sections', () => {
+  it('keys a section by unit and CSD, and the pending section by nothing at all', () => {
+    assert.equal(labourSectionKey('WFR', 'CSD-02'), 'WFR.CSD02')
+    assert.equal(labourSectionKey(' wfr ', 'csd 02'), 'WFR.CSD02')
+    assert.equal(labourSectionKey('WFR', ''), '')
+    assert.equal(labourSectionKey('', 'CSD-02'), '.CSD02')
+  })
+
+  it('names a section after its unit and CSD, or the CSD alone where there is no unit', () => {
+    assert.equal(labourSectionLabel('WFR', 'CSD-02'), 'WFR · CSD-02')
+    assert.equal(labourSectionLabel('', 'CSD-02'), 'CSD-02')
+    assert.equal(labourSectionLabel('WFR', ''), 'Trip DO pending')
+  })
+
+  it('compares unit by unit rather than as one string', () => {
+    assert.ok(compareLabourSectionKeys('WFR.CSD09', 'WFRX.CSD01') < 0)
+    assert.ok(compareLabourSectionKeys('', 'WAC.CSD01') > 0)
+    assert.equal(compareLabourSectionKeys('', ''), 0)
   })
 })
 

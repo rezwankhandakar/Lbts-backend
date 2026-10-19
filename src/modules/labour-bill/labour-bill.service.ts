@@ -13,9 +13,9 @@ import type { UserDocument } from '../user/user.model'
 import {
   LABOUR_BILL_REVIEW_ROLES,
   formatLabourBillNumber,
-  groupLabourLinesByCsd,
+  groupLabourLinesByUnitAndCsd,
   labourBillPeriodLabel,
-  labourGroupLabel,
+  labourCsdLabel,
 } from './labour-bill.constants'
 import { labourCopyHashOf, labourCopyOf } from './labour-bill.copy'
 import { LabourBillLineModel, LabourBillModel } from './labour-bill.model'
@@ -188,8 +188,8 @@ export async function readLabourBillLines(bill: LabourBillDocument): Promise<Lab
 
 /**
  * The whole sheet, as every read of one bill returns it: the month split into
- * one section per CSD, each with its own SL series and its own total, and the
- * rows still waiting for a Trip DO in a pending section at the foot.
+ * one section per unit and CSD, each with its own SL series and its own total,
+ * and the rows still waiting for a Trip DO in a pending section at the foot.
  */
 export async function buildLabourBillDetail(bill: LabourBillDocument): Promise<LabourBillDetail> {
   const { lines, drift } = await readLabourBillLines(bill)
@@ -199,11 +199,12 @@ export async function buildLabourBillDetail(bill: LabourBillDocument): Promise<L
     ...lines.map((line) => line.updatedBy),
   ])
 
-  const groups = groupLabourLinesByCsd(
+  const groups = groupLabourLinesByUnitAndCsd(
     lines.map((line) => ({
       line,
       challanId: String(line.challanId),
       seq: line.seq,
+      unit: line.unit,
       csd: line.csd,
     })),
   ).map((group) => {
@@ -211,6 +212,8 @@ export async function buildLabourBillDetail(bill: LabourBillDocument): Promise<L
       toLabourBillLineRecord(entry.line, entry, drift.get(String(entry.line._id)) ?? 'none', names),
     )
     return {
+      unit: group.unit,
+      unitKey: group.unitKey,
       csd: group.csd,
       key: group.key,
       label: group.label,
@@ -306,8 +309,14 @@ export async function listLabourBills(
 }
 
 /**
- * What each CSD section of one or more labour bills comes to, without opening
- * the sheets.
+ * What each CSD of one or more labour bills comes to, without opening the
+ * sheets.
+ *
+ * **Per CSD with the units added together**, which is coarser than the sheet:
+ * the sheet splits a CSD by unit (WFR's CSD-04 and WAC's CSD-04 are two
+ * sections), while Accounts still receives a month's labour CSD by CSD. The
+ * money is the same either way — this is every section of that CSD summed — and
+ * splitting the receivable by unit too means a unit on every labour payment.
  *
  * The Accounts module reads this to know what a CSD is owed, and it is read
  * rather than stored for the reason a rate is copied and a location is not: the
@@ -400,7 +409,7 @@ export async function labourCsdSummaries(
       sections.push({
         csd,
         key,
-        label: labourGroupLabel(csd),
+        label: labourCsdLabel(csd),
         isPending: key === '',
         rows: row.rows,
         challans,
